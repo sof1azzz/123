@@ -59,7 +59,7 @@ WordCount *find_word(WordCount *wchead, char *word);
 /* Insert word with count=1, if not already present; increment count if present. */
 int add_word(WordCount **wclist, char *word);
 
-static int wordcntcmp(const WordCount *wc1, WordCount *wc2);
+//static int wordcntcmp(const WordCount *wc1, WordCount *wc2);
 
 /* print word counts to a file */
 void fprint_words(WordCount *wchead, FILE *ofile);

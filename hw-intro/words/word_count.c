@@ -102,9 +102,9 @@ int add_word(WordCount **wclist, char *word) {
     return 0;
 }
 
-int wordcntcmp(const WordCount *wc1, WordCount *wc2) {
-    return strcmp(wc1->word, wc2->word);
-}
+// int wordcntcmp(const WordCount *wc1, WordCount *wc2) {
+//     return strcmp(wc1->word, wc2->word);
+// }
 
 void fprint_words(WordCount *wchead, FILE *ofile) {
     /* print word counts to a file */
@@ -114,38 +114,38 @@ void fprint_words(WordCount *wchead, FILE *ofile) {
     }
 }
 
-void wordcount_insert_ordered(WordCount **wclist, WordCount *elem, bool less(const WordCount *, const WordCount *)) {
-    /* Insert word count into the list, ordered accordingly */
-    WordCount *curr = *wclist;
-    WordCount *prev = NULL;
+// void wordcount_insert_ordered(WordCount **wclist, WordCount *elem, bool less(const WordCount *, const WordCount *)) {
+//     /* Insert word count into the list, ordered accordingly */
+//     WordCount *curr = *wclist;
+//     WordCount *prev = NULL;
 
-    while (curr != NULL && less(curr, elem)) {
-        prev = curr;
-        curr = curr->next;
-    }
+//     while (curr != NULL && less(curr, elem)) {
+//         prev = curr;
+//         curr = curr->next;
+//     }
 
-    if (prev == NULL) {
-        // 插入链表头部
-        elem->next = *wclist;
-        *wclist = elem;
-    } else {
-        // 插入链表中间或尾部
-        elem->next = curr;
-        prev->next = elem;
-    }
-}
+//     if (prev == NULL) {
+//         // 插入链表头部
+//         elem->next = *wclist;
+//         *wclist = elem;
+//     } else {
+//         // 插入链表中间或尾部
+//         elem->next = curr;
+//         prev->next = elem;
+//     }
+// }
 
-void wordcount_sort(WordCount **wclist, bool less(const WordCount *, const WordCount *)) {
-    /* Sort the word count list in place */
-    WordCount *result = NULL;
-    WordCount *curr = *wclist;
-    WordCount *next;
+// void wordcount_sort(WordCount **wclist, bool less(const WordCount *, const WordCount *)) {
+//     /* Sort the word count list in place */
+//     WordCount *result = NULL;
+//     WordCount *curr = *wclist;
+//     WordCount *next;
 
-    while (curr != NULL) {
-        next = curr->next;
-        wordcount_insert_ordered(&result, curr, less);
-        curr = next;
-    }
+//     while (curr != NULL) {
+//         next = curr->next;
+//         wordcount_insert_ordered(&result, curr, less);
+//         curr = next;
+//     }
 
-    *wclist = result;
-}
+//     *wclist = result;
+// }

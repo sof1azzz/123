@@ -1,0 +1,387 @@
+
+==============================
+ Chapter 2 - OS Kernel Details
+==============================
+
+----------------------------------------
+2.1 The Process Abstraction
+----------------------------------------
+
+🔹 PCB (Process Control Block)
+The PCB stores all the information the operating system needs about a particular process:
+- Where it is stored in memory
+- Where its executable image resides on disk
+- Which user asked it to execute
+- What privileges the process has
+
+----------------------------------------
+2.2 Dual-Mode Operation
+----------------------------------------
+
+🔹 User Mode vs. Kernel Mode
+- In user mode, protection checks are enforced by the CPU.
+- In kernel mode, the OS executes with full privileges.
+
+🔹 Required Hardware Support
+1. Privileged Instructions
+2. Memory Protection
+3. Timer Interrupts
+4. Safe transition between modes
+
+----------------------------------------
+2.3 Types of Mode Transfer
+----------------------------------------
+
+🔹 User → Kernel
+- Interrupts: Asynchronous hardware signals
+- Processor Exception: Errors like divide-by-zero
+- System Calls: Interface to kernel services
+
+🔹 Kernel → User
+- Start/resume/switch process, upcalls
+
+----------------------------------------
+2.4 Implementing Safe Mode Transfer
+----------------------------------------
+
+1. Interrupt Vector Table
+2. Interrupt Stack
+3. Two Stacks per Process
+4. Interrupt Masking
+5. Saving/Restoring Registers
+
+----------------------------------------
+2.5 x86 Mode Transfer (Trapframe)
+----------------------------------------
+
+Steps:
+1. Mask interrupts
+2. Save SS, ESP, EFLAGS, CS, EIP to temp regs
+3. Switch to kernel stack
+4. Push saved values onto kernel stack
+5. Push error code (if any)
+6. Jump to interrupt handler
+
+📦 x86 Trapframe (Top to Bottom of Kernel Stack):
+--------------------------------------------------
+- General Registers (via pushad):
+  EAX, EBX, ECX, EDX, ESI, EDI, EBP, ESP
+- Error Code or Dummy
+- EIP
+- CS
+- EFLAGS
+- ESP (user)
+- SS (user)
+
+🧠 Register Usage Summary:
+
+| Register | Name                | Purpose                                      |
+|----------|---------------------|----------------------------------------------|
+| EIP      | Instruction Pointer | Next instruction to execute                  |
+| CS       | Code Segment        | Segment selector for EIP                    |
+| EFLAGS   | Flags Register      | Status and control flags                     |
+| ESP      | Stack Pointer       | User stack pointer for context restoration   |
+| SS       | Stack Segment       | Selector for ESP                             |
+| EAX      | Accumulator         | Return value, arithmetic                     |
+| EBX      | Base                | Addressing, temporary data                   |
+| ECX      | Counter             | Loop counts, shift operations                |
+| EDX      | Data                | I/O, arithmetic                              |
+| ESI      | Source Index        | String/memory source                         |
+| EDI      | Destination Index   | String/memory destination                    |
+| EBP      | Base Pointer        | Stack frame for function                     |
+| ESP      | Stack Pointer       | Stack top                                    |
+
+----------------------------------------
+2.6 Implementing Secure System Calls
+----------------------------------------
+
+When crossing user ↔ kernel boundary, kernel must assume inputs may be malicious.
+
+🛡️ Kernel Stub Responsibilities:
+1. Locate system call arguments
+2. Validate parameters (e.g., bounds, permissions)
+3. Copy args to kernel memory BEFORE checking (prevent TOCTOU)
+4. Copy results back to user space safely
+
+🔁 Example Flow:
+
+User Program
+    ↓
+User Stub
+    ↓  (int #TrapCode)
+→ Trap Handler (in Kernel)
+    ↓
+Validate + Copy Args (Kernel Stub)
+    ↓
+Kernel Operation (e.g., open)
+    ↓
+Return Result
+    ↓
+User Stub ← %eax
+    ↓
+User Program resumes
+
+🔧 Kernel Stub Code Example (open):
+int KernelStub_Open() {
+    char *localCopy[MaxSize + 1];
+    
+    if (!validUserAddressRange(...)) return error;
+    
+    filename = VirtualToKernel(userStackPointer);
+    
+    if (!VirtualToKernelStringCopy(filename, localCopy, MaxSize)) return error;
+    
+    localCopy[MaxSize] = 0;
+    
+    if (!UserFileAccessPermitted(...)) return error;
+    
+    return Kernel_Open(localCopy);
+}
+
+----------------------------------------
+2.7 Starting a New Process
+----------------------------------------
+
+The kernel must:
+
+1. Allocate and initialize the process control block.
+
+2. Allocate memory for the process.
+ 
+3. Copy the program from disk into the newly allocated memory.
+
+4. Allocate a user-level stack for user-level execution.
+
+5. Allocate a kernel-level stack for handling system calls, interrupts and processor exceptions.
+
+To start running the program, the kernel must also:
+
+1. Copy arguments into user memory.
+
+2. Transfer control to user mode. 
+
+The compiler inserts one level of indirection. It puts a "stub" at the location in the process’s
+memory where the kernel will jump when the process starts. The stub’s job is to call main
+and then, if main returns, to call exit — the system call to terminate the process. Without
+the stub, a user program that returned from main would try to pop the return program
+counter, and since there is no such address on the stack, the processor would start
+executing random code.
+    start(arg1, arg2) { 
+        main(arg1, arg2);   // Call program main. 
+        exit();             // If main returns, call exit. 
+    }
+
+----------------------------------------
+2.8 Implementing Upcalls
+----------------------------------------
+
+----------------------------------------
+2.9 Case Study: Booting an Operating System Kernel
+----------------------------------------
+
+----------------------------------------
+2.10 Case Study: Virtual Machines
+----------------------------------------
+
+Exercises
+
+1. When a user process is interrupted or causes a processor exception, the x86
+ hardware switches the stack pointer to a kernel stack, before saving the current
+ process state. Explain why.
+
+x86 硬件在中断或异常时切换到内核栈的原因：
+主要原因：安全性和可靠性。
+用户栈不可信： 用户进程的栈可能已经被破坏（例如，缓冲区溢出攻击）、指向无效内存地址，或者根本没有足够的空间（栈溢出）。如果内核试图在用户栈上保存状态或执行处理程序，可能会因为栈本身的问题而崩溃。
+内核隔离： 内核需要在其自身受保护的地址空间中运行，使用一个独立、可靠、大小已知的栈。这确保了中断或异常处理程序有一个干净、安全的环境来执行，不会受到用户进程状态的影响。
+过程： 当中断或异常发生时，硬件会自动执行以下操作（简化）：
+查询中断描述符表 (IDT) 获取处理程序的地址和目标代码段选择子。
+目标代码段选择子指定了内核代码段，因此 CPU 特权级提升到内核态（Ring 0）。
+硬件从任务状态段 (TSS) 或类似结构中加载预设的内核栈指针 (SS0:ESP0 或 RSP0)。
+硬件将用户态的栈指针 (SS:ESP 或 RSP)、标志寄存器 (EFLAGS 或 RFLAGS)、代码段选择子 (CS) 和指令指针 (EIP 或 RIP) 推送到新的内核栈上。
+跳转到中断/异常处理程序执行。
+通过切换到内核栈，硬件保证了内核在接管控制权时，拥有一个稳定可靠的执行环境来保存用户状态并处理事件。
+
+
+2. For the “Hello world” program, we mentioned that the kernel must copy the string from
+ the user program to screen memory. Why must the screen’s buffer memory be
+ protected? Explain what might happen if a malicious application could alter any pixel
+ on the screen, not just those within its own window.
+
+屏幕缓冲区内存保护：
+保护原因：
+完整性： 防止一个应用程序恶意或意外地覆盖其他应用程序的窗口内容、系统 UI 元素（如任务栏、菜单、对话框）或桌面背景。这维护了用户界面的稳定性和可预测性。
+安全性： 防止恶意应用程序进行 UI 欺骗。例如：
+绘制假的登录框覆盖在合法应用的窗口上，窃取用户密码。
+覆盖系统安全警告或权限请求对话框，诱骗用户执行危险操作。
+隐藏或伪造关键信息。
+隔离性： 保证每个应用程序只能在其分配的窗口区域内绘制，这是图形化操作系统窗口管理的基础。
+无保护的后果：
+UI 混乱和系统不稳定： 应用程序可以随意涂抹屏幕，导致界面混乱不堪，用户无法正常使用。关键的系统信息可能被覆盖。
+UI 欺骗和钓鱼： 恶意软件可以轻松伪造任何应用程序或系统对话框的外观，诱导用户输入敏感信息或授权恶意操作。
+拒绝服务： 恶意程序可以通过快速、无意义地填满整个屏幕缓冲区来使显示器无法使用。
+信息泄露： 理论上，如果能读取整个屏幕缓冲区，可能读取到其他应用程序窗口中的敏感信息（尽管现代系统通常有更强的隔离，写入保护是基础）。
+
+
+3. For each of the three mechanisms that supports dual-mode operation — privileged
+ instructions, memory protection, and timer interrupts — explain what might go wrong
+ without that mechanism, assuming the system still had the other two.
+
+缺少双模式操作机制之一的后果（假设其他两个存在）：
+缺少特权指令：
+后果： 用户程序将能够执行所有 CPU 指令，包括那些控制硬件、内存管理和中断的指令。
+具体问题：
+用户程序可以直接执行 I/O 指令，绕过内核的安全检查和资源管理，随意访问磁盘、网络等设备。
+用户程序可以修改页表，访问内核或其他进程的内存（即使内存保护机制存在，但修改页表的指令不再受保护）。
+用户程序可以禁用中断，导致无法响应硬件事件，无法进行时间片轮转（即使定时器中断硬件存在，但禁用中断的指令可被用户执行）。
+用户程序可以执行 hlt 指令停机。
+结果： 系统完全失去控制，没有安全性和稳定性可言。内存保护和定时器中断会因为用户程序能直接禁用或操纵它们而失效。
+缺少内存保护：
+后果： 用户程序可以访问物理内存的任何位置。
+具体问题：
+用户程序可以读取或写入内核代码和数据结构，破坏内核运行，或者通过修改内核数据提升自身权限。
+用户程序可以读取或写入其他用户进程的内存空间，窃取数据或使其他进程崩溃。
+即使有特权指令，内核也无法保证自身的完整性，因为用户程序可以直接修改内核内存。
+结果： 系统极不稳定，毫无安全性。内核和进程之间没有隔离。
+缺少定时器中断：
+后果： 内核无法保证周期性地重新获得 CPU 控制权。
+具体问题：
+如果一个用户程序进入无限循环或长时间等待（并且不主动放弃 CPU），它将永久占用 CPU。
+内核无法实现抢占式多任务处理。系统要么变成协作式多任务（依赖程序自愿放弃 CPU），要么单任务卡死。
+依赖于时间的服务（如记账、性能监控、定时任务）将无法准确执行。
+结果： 系统响应性差，公平性无法保证，容易被单个行为不当的程序卡死。虽然有特权指令和内存保护，但内核可能长时间无法运行来执行管理任务。
+
+ 4. Suppose you are tasked with designing the security system for a new web browser
+ that supports rendering web pages with embedded web page scripts. What checks
+ would you need to implement to ensure that executing buggy or malicious scripts
+ could not corrupt or crash the browser?
+
+ 5. Define three types of user-mode to kernel-mode transfers.
+
+用户模式到内核模式转换的三种类型：
+系统调用 (System Call) / 陷阱 (Trap)： 用户程序主动请求操作系统服务。这是程序自愿发起的控制权转移。例如，请求读文件 (read)、创建进程 (fork)、分配内存等。通常通过特定的 syscall、sysenter 或 int (如 int 0x80) 指令触发。
+处理器异常 (Processor Exception) / 故障 (Fault) / 中止 (Abort)： CPU 在执行用户程序指令期间检测到错误或特殊情况，被动地将控制权交给内核处理。例如，除零错误、访问无效内存地址（页错误 Page Fault）、执行非法指令、断点指令 (int 3) 等。
+中断 (Interrupt)： 由外部硬件设备发出信号，请求 CPU 的注意，异步地打断当前用户程序的执行，将控制权交给内核。例如，键盘输入、鼠标移动、网络数据包到达、磁盘操作完成、定时器到期等。
+
+ 6. Define four types of kernel-mode to user-mode transfers.
+
+内核模式到用户模式转换的四种类型：
+从系统调用返回： 内核完成了用户程序请求的服务，准备将结果返回给用户程序，并将控制权交还。这是最常见的转换之一。
+从异常/故障处理返回： 内核处理完异常（例如，处理了页错误并加载了所需页面）后，通常会恢复用户程序的执行，使其从之前中断的地方继续运行（或者如果无法恢复，则终止该进程）。
+从中断处理返回： 内核处理完硬件中断（例如，处理了到达的网络包）后，通常会恢复被中断的用户程序的执行（可能是之前运行的进程，也可能是另一个准备运行的进程）。
+进程调度/上下文切换： 内核决定停止当前正在运行的进程（可能在内核态处理完某个任务后，或因为时间片用完），选择另一个处于就绪态的用户进程，加载其状态，并将 CPU 控制权转移给新选中的用户进程。
+启动新进程： 内核完成了一个新进程的创建和初始化（如通过 fork 和 exec），然后将控制权首次转移给这个新进程的用户态入口点。可以看作是调度的一种特殊情况。
+
+ 7. Most hardware architectures provide an instruction to return from an interrupt, such as
+ iret. This instruction switches the mode of operation from kernel-mode to user-mode.
+ a. Explain where in the operating system this instruction would be used.
+ b. Explain what happens if an application program executes this instruction.
+
+iret (或类似) 指令：
+a. 在操作系统中的使用位置： 该指令位于中断、异常或系统调用处理程序的末尾，是内核完成处理并将控制权返回给用户模式代码之前的最后一步。它的作用是原子地恢复之前保存的用户态的指令指针、代码段、标志寄存器，并将 CPU 模式切换回用户模式，可能还会恢复用户态的栈指针。
+b. 应用程序执行 iret： iret (或 sysexit, sysret 等) 通常是特权指令。如果用户模式下的应用程序试图执行它，硬件会检测到权限不足，并触发一个保护性异常 (Protection Fault / General Protection Fault)。这个异常会再次将控制权陷阱 (trap) 回内核。内核的异常处理程序会识别出这是一个非法操作，通常的处理方式是终止这个试图执行非法指令的用户应用程序。
+
+ 8. A hardware designer argues that there is now enough on-chip transistors to provide
+ 1024 integer registers and 512 floating point registers. As a result, the compiler should
+ almost never need to store anything on the stack. As an operating system guru, give
+ your opinion of this design.
+ a. What is the effect on the operating system of having a large number of registers?
+ b. What hardware features would you recommend adding to the design?
+ c. What happens if the hardware designer also wants to add a 16-stage pipeline into
+ the CPU, with precise exceptions. How would that affect the user-kernel switching
+ overhead?
+
+a. 对操作系统的影响：
+显著增加上下文切换开销： 主要的负面影响。每次进程切换、甚至每次中断/异常处理（如果需要切换到不同进程的上下文），操作系统都需要保存当前进程的所有 1024 个整数寄存器和 512 个浮点寄存器，并加载下一个进程的相应寄存器。这比保存/加载传统的 32 或 64 个通用寄存器要慢得多，消耗更多的内存带宽和 CPU 时间，从而降低了系统的整体吞吐量和响应性。
+可能减少函数调用栈的使用： 对于单个程序执行流内部，更多的寄存器可能意味着编译器可以将更多的局部变量和中间结果保存在寄存器中，减少对内存栈的访问，理论上可以提高单线程执行速度。但这并不能消除上下文切换的成本。
+
+9. With virtual machines, the host kernel runs in privileged mode to create a virtual
+ machine that runs in user mode. The virtual machine provides the illusion that the
+ guest kernel runs on its own machine in privileged mode, even though it is actually
+ running in user mode.
+ Early versions of the x86 architecture (pre-2006) were not completely virtualizable —
+ these systems could not guarantee to run unmodified guest operating systems
+ properly. One problem was the popf “pop flags” instruction that restores the processor
+ status word. When popf was run in privileged mode, it changed both the ALU flags
+ (e.g., the condition codes) and the systems flags (e.g., the interrupt mask). When popf
+ was run in unprivileged mode, it changed just the ALU flags.
+a. Why do instructions like popf prevent transparent virtualization of the (old) x86
+ architecture?
+ b. How would you change the (old) x86 hardware to fix this problem?
+
+10. Which of the following components is responsible for loading the initial value in the
+ program counter for an application program before it starts running: the compiler, the
+ linker, the kernel, or the boot ROM?
+
+11. We described how the operating system kernel mediates access to I/O devices for
+ safety. Some newer I/O devices are virtualizable — they permit safe access from user
+level programs, such as a guest operating system running in a virtual machine.
+ Explain how you might design the hardware and software to get this to work. (Hint:
+ The device needs much of the same hardware support as the operating system
+ kernel.)
+
+12. System calls vs. procedure calls: How much more expensive is a system call than a
+ procedure call? Write a simple test program to compare the cost of a simple procedure
+ call to a simple system call (getpid() is a good candidate on UNIX; see the man page).
+ To prevent the optimizing compiler from “optimizing out" your procedure calls, do not
+ compile with optimization on. You should use a system call such as the UNIX
+ gettimeofday() for time measurements. Design your code so the measurement
+ overhead is negligible. Also, be aware that timer values in some systems have limited
+ resolution (e.g., millisecond resolution).
+ Explain the difference (if any) between the time required by your simple procedure call
+ and simple system call by discussing what work each call must do.
+
+13. Suppose you have to implement an operating system on hardware that supports
+ interrupts and exceptions but does not have a trap instruction. Can you devise a
+ satisfactory substitute for traps using interrupts and/or exceptions? If so, explain how.
+ If not, explain why.
+
+替代陷阱指令 (Trap Instruction)：
+可以。 可以使用处理器异常 (Processor Exception) 来模拟陷阱。
+方法：
+操作系统预留一个特定的、用户程序可以故意触发的异常。常见的选择是：
+执行一条非法指令 (Undefined Instruction Exception)。OS 可以保留一个特定的、保证非法的操作码。
+执行一条特权指令 (Privileged Instruction Exception)。用户态执行特权指令会触发异常。
+访问一个特定的、无效的内存地址 (Segmentation Fault / Page Fault)。OS 可以保留一小块永远不映射的内存区域，访问它就会触发异常。
+使用软件中断指令 (Software Interrupt / Breakpoint Instruction)，如果硬件支持的话（例如 x86 的 int n 指令，即使没有专门的 syscall，int 本身也可以用于陷阱，虽然它通常被归类为中断）。
+除零异常 (Divide-by-zero Exception)。可以通过设置特定的被除数和除数（0）来触发。
+当用户程序需要进行“系统调用”时，它不执行 trap 指令，而是执行选定的、会触发预留异常的操作，并将系统调用号和参数按约定放在寄存器或内存中。
+CPU 发生异常，控制权转移到内核的异常处理程序。
+内核的异常处理程序检查异常类型。如果是预留的“系统调用”异常，它就从约定的位置读取系统调用号和参数，然后分派到相应的内核服务例程。
+处理完成后，内核通过类似 iret 的指令返回用户程序。
+可行性： 这种方法是可行的，早期系统或某些嵌入式系统可能就采用类似方式。但它可能比专门的 trap 或 syscall 指令效率稍低，因为它依赖于通用的异常处理机制。
+
+14. Suppose you have to implement an operating system on hardware that supports
+ exceptions and traps but does not have interrupts. Can you devise a satisfactory
+ substitute for interrupts using exceptions and/or traps? If so, explain how. If not,
+ explain why.
+
+替代中断 (Interrupts)：
+不可以有效地替代。 使用异常和陷阱无法完全替代硬件中断的功能，尤其是在处理异步 I/O 和实现抢占式多任务方面。
+原因：
+异步性： 中断的核心价值在于处理异步事件——那些与 CPU 当前执行的指令流无关的外部事件（磁盘完成读写、网络包到达、定时器到期）。陷阱和异常都是同步事件，它们是由 CPU 当前正在执行的指令直接引起的。
+I/O 处理： 没有中断，操作系统只能使用轮询 (Polling) 来检查 I/O 设备的状态。CPU 需要不断地、主动地去询问每个设备：“你完成了吗？” “有数据吗？”。这极大地浪费了 CPU 时间，效率低下，并且可能导致事件响应延迟（如果在轮询其他设备时错过了某个设备的信号）。
+抢占式多任务： 定时器中断是实现抢占式多任务的基础。内核依赖定时器中断来周期性地获得 CPU 控制权，即使当前运行的用户程序不愿意放弃 CPU（例如陷入死循环）。没有定时器中断，系统只能实现协作式多任务（程序必须自愿调用 yield 之类的函数放弃 CPU），或者在单个程序卡死时整个系统失去响应。
+结论： 陷阱和异常处理 CPU 内部或程序执行引发的事件，而中断处理外部硬件引发的异步事件。两者机制不同，目的不同，无法互相完全替代。没有中断的系统将非常低效且响应性差。
+
+15. Explain the steps that an operating system goes through when the CPU receives an
+ interrupt.
+
+16. When an operating system receives a system call from a program, a switch to
+ operating system code occurs with the help of the hardware. The hardware sets the
+ mode of operation to kernel mode, calls the operating system trap handler at a
+ location specified by the operating system, and lets the operating system return to
+ user mode after it finishes its trap handling.
+ Consider the stack on which the operating system must run when it receives the
+ system call. Should this stack be different from the one the application uses, or could it
+use the same stack as the application program? Assume that the application program
+ is blocked while the system call runs.
+
+17. Write a program to verify that the operating system on your computer correctly
+ protects itself from rogue system calls. For a single system call — such as file system
+ open — try all possible illegal calls: e.g., an invalid system call number, an invalid
+ stack pointer, an invalid pointer stored on the stack, etc. What happens
+
+
+
+
+

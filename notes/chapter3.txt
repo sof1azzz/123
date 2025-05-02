@@ -1,0 +1,415 @@
+
+========================================
+ Chapter 2 - The Programming Interface
+========================================
+
+----------------------------------------
+3.1 Process Management
+----------------------------------------
+
+1. UNIX fork
+
+2. UNIX exec and wait
+
+UNIX exec does the following steps:
+    Load the program prog into the current address space.
+    Copy arguments args into memory in the address space.
+    Initialize the hardware context to start execution at “start.”
+
+----------------------------------------
+3.2 Input/Output
+----------------------------------------
+
+1. Basic ideas in the UNIX I/O interface
+
+2. Pipes
+
+----------------------------------------
+Summary
+----------------------------------------
+
+进程管理 (Creating and Managing Processes)
+
+fork()
+    创建一个子进程，作为当前进程的克隆。fork 调用会在父进程和子进程中都返回。
+
+exec(prog, args)
+    在当前进程中运行应用程序 prog，并传递参数 args。
+
+exit()
+    通知内核当前进程已完成，其数据结构应被垃圾回收。
+
+wait(processID)
+    暂停执行，直到指定的子进程 processID 退出。
+
+signal(processID, type)
+    向指定的进程 processID 发送一个特定类型 type 的中断信号。
+
+
+输入/输出操作 (I/O Operations)
+
+open(name)
+    打开一个由 name 指定的文件、通道或硬件设备；返回一个文件描述符（file descriptor），可用于其他系统调用。
+
+pipe(fileDesc[2])
+    创建一个单向管道，用于两个进程之间的通信。pipe 返回两个文件描述符，一个用于读取 (fileDesc[0])，一个用于写入 (fileDesc[1])。
+
+dup2(fromFileDesc, toFileDesc)
+    用 fromFileDesc 的副本替换 toFileDesc 文件描述符。常用于在调用 exec 之前，在子进程中替换标准输入（stdin）、标准输出（stdout）或两者。
+
+read(fileDesc, buffer, size)
+    从文件、通道或设备（由 fileDesc 指定）读取最多 size 字节到缓冲区 buffer 中。read 返回实际读取的字节数。对于流设备，这通常会小于 size（例如，从键盘设备读取通常返回所有排队的字节）。
+
+write(fileDesc, buffer, size)
+    类似于 read，将缓冲区 buffer 中的最多 size 字节写入到与文件、通道或设备（由 fileDesc 指定）关联的内核输出缓冲区中。write 通常会立即返回，但如果内核缓冲区没有空间，则可能会阻塞。
+
+select(fileDesc[], arraySize)
+    当数组 fileDesc[] 中的任何一个文件描述符有数据可读时返回。返回那个有待处理数据的文件的描述符。
+
+close(fileDescriptor)
+    通知内核该进程已完成对指定文件、通道或设备（由 fileDescriptor 指定）的操作。
+
+----------------------------------------
+3.3 Case Study: Implementing a Shell
+----------------------------------------
+
+main() { 
+        char *prog = NULL; 
+        char **args = NULL; 
+        // Read the input a line at a time, and parse each line into the program 
+        // name and its arguments. End loop if we’ve reached the end of the input. 
+        while (readAndParseCmdLine(&prog, &args)) { 
+            // Create a child process to run the command. 
+            int child_pid = fork(); 
+            if (child_pid == 0) { 
+                // I’m the child process. 
+                // Run program with the parent’s input and output. 
+                exec(prog, args); 
+                // NOT REACHED 
+            } else { 
+                // I’m the parent; wait for the child to complete. 
+                wait(child_pid); 
+                return 0; 
+            } 
+        }   
+} 
+
+----------------------------------------
+3.4 Case Study: Interprocess Communication
+----------------------------------------
+
+进程间通信 (Interprocess Communication - IPC) - 3.4
+
+核心思想：
+将复杂应用分解为专门任务的小程序，并通过 IPC 将它们组合起来。
+
+主要 IPC 模型：
+1.  生产者-消费者 (Producer-Consumer):
+    *   单向通信：一个程序（生产者）的输出是另一个程序（消费者）的输入。
+    *   实现：通常通过管道（pipe）和内核缓冲区。生产者用 write 写入，消费者用 read 读出。
+    *   特点：允许程序链式组合 (如 UNIX shell 管道)；内核缓冲区解耦了生产者和消费者的速度差异，并处理流控（满则写阻塞，空则读阻塞）；消费者读取结束时会收到文件结束标记 (EOF)。
+    *   优点：简单、高效，减少上下文切换。
+
+2.  客户端-服务器 (Client-Server):
+    *   双向通信：客户端发送请求给服务器，服务器处理后返回响应。
+    *   实现：通常用两个管道，一个用于请求，一个用于响应。
+    *   特点：服务器提供专门服务（如打印、显示管理）；可以使用 select 系统调用让服务器同时处理多个客户端的请求。
+    *   优化：可以合并写后读操作、让客户端“捐赠”CPU时间给服务器、使用共享内存（多核系统）来提高性能。
+
+3.  文件系统 (File System):
+    *   通过读写文件进行间接通信。
+    *   特点：通信双方不需要同时运行（时间解耦）；数据需要持久存储在磁盘上并有命名。
+
+----------------------------------------
+3.5 Operating System Structure
+----------------------------------------
+
+操作系统结构 (Operating System Structure) - 3.5
+
+核心问题：如何组织操作系统内部模块？
+
+主要结构类型：
+1.  宏内核 (Monolithic Kernels):
+    *   特点：大部分 OS 功能（内存管理、文件系统、调度、驱动等）都在内核空间运行，模块间直接调用。 (如 Windows, macOS, Linux)
+    *   优点：性能高，模块间集成紧密。
+    *   缺点：不够灵活，修改困难，一个模块的 bug 可能导致整个系统崩溃。
+    *   关键技术：
+        *   硬件抽象层 (HAL): 提供可移植接口，隔离硬件相关代码（中断、定时器、地址转换等），便于 OS 移植。
+        *   动态加载设备驱动程序: 允许在内核运行后加载特定设备的管理代码。解决了硬件多样性问题，但驱动 bug 是系统崩溃的主要原因 (~90%)。
+    *   应对驱动问题的方法：代码审查、崩溃报告分析、用户级驱动（隔离性好但性能/兼容性有挑战）、虚拟机驱动（在 Guest OS 中运行驱动）、驱动沙箱（内核内受限环境）。
+
+2.  微内核 (Microkernel):
+    *   特点：内核只保留最基本功能（IPC、基本调度、地址空间管理），大部分 OS 服务（文件系统、网络协议栈、驱动等）作为用户级服务器进程运行。
+    *   优点：模块化好，易于开发和调试，单个服务崩溃不影响整个系统，可靠性可能更高，更灵活。
+    *   缺点：服务间通信需要通过内核进行 IPC，性能开销比宏内核的直接函数调用大。
+    *   实践：纯粹的微内核较少，多数系统采用混合模式，根据性能和复杂度的权衡将部分服务放在内核，部分放在用户空间。
+
+----------------------------------------
+Exercises
+----------------------------------------
+
+Exercises and Answers
+
+1. Can UNIX fork return an error? Why or why not?
+   Note: You can answer this question by looking at the manual page for fork, but before
+   you do that, think about what the fork system call does. If you were designing this call,
+   would you need to allow fork to return an error?
+
+   Answer:
+   Yes, `fork()` can return an error. `fork()` creates a new process, which requires system resources like memory (for the process control block, page tables, etc.) and an entry in the process table. If the system has insufficient resources (e.g., not enough memory/swap space, or the user has reached their maximum allowed number of processes), the kernel cannot create the new process and `fork()` will fail, returning -1 to the parent process. An error code will also be set in the `errno` variable (e.g., EAGAIN or ENOMEM). Good design requires handling potential resource exhaustion, so allowing `fork` to return an error is necessary.
+
+2. Can UNIX exec return an error? Why or why not?
+   Note: You can answer this question by looking at the manual page for exec, but before
+   you do that, think about what the exec system call does. If you were designing this
+   call, would you need to allow it to return an error?
+
+   Answer:
+   Yes, `exec()` (referring to the family of functions like `execl`, `execvp`, etc.) can return an error. `exec` attempts to replace the current process image with a new program image loaded from a file. This can fail for several reasons:
+   *   The specified program file does not exist.
+   *   The file exists but the user does not have execute permission.
+   *   The file is not a valid executable format for the system.
+   *   System resource limits (like memory) prevent loading the new program.
+   If `exec` succeeds, it *does not return* to the calling program because the calling program's image has been overwritten. It only returns (with a value of -1 and `errno` set) if an error occurs during the attempt to load and start the new program. Therefore, allowing it to return an error is essential for indicating failure.
+
+3. What happens if we run the following program on UNIX?
+       main() {
+           while (fork() >= 0)
+               ;
+       }
+
+   Answer:
+   This program creates a "fork bomb". Here's the breakdown:
+   *   The `while` loop condition checks the return value of `fork()`.
+   *   `fork()` returns the child's PID (a positive number) to the parent, 0 to the child, and -1 on error.
+   *   Initially, `fork()` succeeds, returning >= 0. The loop continues.
+   *   Crucially, *both* the parent and the newly created child process continue executing the loop from the point after the `fork()` call.
+   *   Each process then calls `fork()` again, creating another child.
+   *   This leads to an exponential increase in the number of processes (1 -> 2 -> 4 -> 8 -> ...).
+   *   Very quickly, the system's process table will fill up, or available memory/swap will be exhausted.
+   *   Eventually, `fork()` calls will start failing, returning -1. At this point, the condition `fork() >= 0` becomes false for those processes experiencing the error, and they will exit the loop (and likely the program).
+   *   However, the sheer number of processes created before failure consumes system resources, making the system extremely slow or completely unresponsive, often requiring a reboot.
+
+4. Explain what must happen for UNIX wait to return immediately (and successfully).
+
+   Answer:
+   The `wait()` system call (and related calls like `waitpid()`) normally pauses the parent process until one of its child processes terminates. For `wait()` to return immediately and successfully, there must *already* be a terminated child process whose status has not yet been collected by the parent. Such a terminated but not-yet-waited-for child is often called a "zombie" process. When the parent calls `wait()`, the kernel sees the available zombie child, collects its status information (like exit code), cleans up the remaining process table entry for the child, and returns the child's PID and status information to the parent immediately without blocking.
+
+5. Suppose you were the instructor of a very large introductory programming class.
+   Explain (in English) how you would use UNIX system calls to automate testing of
+   submitted homework assignments.
+
+   Answer:
+   You could create a testing script or program that uses UNIX system calls as follows:
+   1.  **Prepare Test Cases:** Have input files (`test_case_N.in`) and corresponding expected output files (`test_case_N.expected.out`) for each assignment.
+   2.  **Iterate Through Submissions:** For each student's submitted program (e.g., `student_program.c`):
+      a.  **Compile:** Use `fork()` and `exec()` to run the compiler (like `gcc`) to compile the student's code into an executable (e.g., `student_executable`). Check the compiler's exit status using `wait()`. If compilation fails, record the error.
+      b.  **Run Tests:** If compilation succeeds, iterate through each test case:
+          i.   **Create Child Process:** Use `fork()` to create a child process that will run the student's executable.
+          ii.  **Redirect I/O (Child):** In the child process, before running the student's code:
+              *   Use `open()` to open the corresponding `test_case_N.in` file for reading.
+              *   Use `dup2()` to redirect the child's standard input (file descriptor 0) to the opened input file descriptor.
+              *   Use `open()` to create/truncate an output file (`student_N.actual.out`) for writing.
+              *   Use `dup2()` to redirect the child's standard output (file descriptor 1) to the opened output file descriptor.
+              *   Close the original file descriptors obtained from `open()`.
+          iii. **Execute Student Code (Child):** Use `exec()` (e.g., `execv`) to run the compiled `student_executable`. If `exec` fails, the child should report an error and exit.
+          iv.  **Wait for Child (Parent):** In the parent process, use `wait()` or `waitpid()` to wait for the child process to complete. Check the child's exit status. You might also implement a timeout using `alarm()` and `signal()` handlers in the parent to kill runaway student processes.
+          v.   **Compare Output (Parent):** After the child finishes, the parent process compares the contents of the actual output file (`student_N.actual.out`) with the expected output file (`test_case_N.expected.out`) using a tool like `diff` (which itself can be run via `fork`/`exec`/`wait`).
+          vi.  **Record Results:** Record whether the test case passed or failed based on the comparison and the child's exit status.
+   3.  **Summarize:** Aggregate the results for each student submission.
+
+6. What happens if you run “exec csh” in a UNIX shell? Why?
+
+   Answer:
+   The `exec` command in a shell tells the shell *not* to create a new process. Instead, the shell itself calls the `exec()` system call to *replace its own process image* with the specified program (`csh` in this case).
+   *   The currently running shell process terminates.
+   *   The `csh` program starts running within the *same process ID* that the original shell had.
+   *   You will be presented with a `csh` prompt, and your interactive session continues within `csh`. When you exit `csh`, the process terminates, likely closing your terminal session or returning you to whatever process launched the original shell.
+
+7. What happens if you run “exec ls” in a UNIX shell? Why?
+
+   Answer:
+   Similar to the previous question, `exec ls` causes the shell to replace itself with the `ls` program.
+   *   The currently running shell process terminates.
+   *   The `ls` command runs in the same process ID.
+   *   `ls` lists the contents of the current directory to standard output.
+   *   Once `ls` completes its task, it exits.
+   *   Since the process that was running `ls` (which used to be the shell) has now exited, your terminal session will likely close, or you will return to the parent process of the original shell. You won't get your shell prompt back because the shell process no longer exists.
+
+8. How many processes are created if the following program is run?
+       main(int argc, char ** argv) {
+           forkthem(5)
+       }
+       void forkthem(int n) {
+           if (n > 0) {
+               fork();
+               forkthem(n-1);
+           }
+       }
+
+   Answer:
+   Let's trace the number of `fork()` calls:
+   *   `forkthem(5)` calls `fork()` (1st call), then 2 processes call `forkthem(4)`.
+   *   The 2 processes calling `forkthem(4)` each call `fork()` (2nd, 3rd calls), then 4 processes call `forkthem(3)`.
+   *   The 4 processes calling `forkthem(3)` each call `fork()` (4th-7th calls), then 8 processes call `forkthem(2)`.
+   *   The 8 processes calling `forkthem(2)` each call `fork()` (8th-15th calls), then 16 processes call `forkthem(1)`.
+   *   The 16 processes calling `forkthem(1)` each call `fork()` (16th-31st calls), then 32 processes call `forkthem(0)`.
+   *   `forkthem(0)` does nothing.
+   The total number of times `fork()` is called is 1 + 2 + 4 + 8 + 16 = 31.
+   Each successful call to `fork()` creates exactly one new process.
+   Therefore, **31** new processes are created. (The total number of processes existing at the end, including the original, would be 32).
+
+9. Consider the following program:
+       main (int argc, char ** argv) {
+           int child = fork();
+           int x = 5;
+           if (child == 0) { // Child P1
+               x += 5;
+           } else { // Parent P0
+               child = fork(); // P0 forks again, creating P2
+               x += 10;
+               if(child) { // P0 (child = P2's PID > 0)
+                   x += 5;
+               }
+               // P2 (child = 0) does not enter this inner if
+           }
+       }
+   How many different copies of the variable x are there? What are their values when
+   their process finishes?
+
+   Answer:
+   There will be three processes executing parts of this code after the forks: the original parent (P0), the first child (P1), and the second child (P2 created by P0). Each process gets its own independent copy of the variable `x` after a `fork`.
+
+   *   **Process P1 (First Child):**
+      *   `fork()` returns 0 to P1. `x` starts at 5.
+      *   Enters `if (child == 0)`.
+      *   `x += 5;` (x becomes 10).
+      *   Finishes with `x = 10`.
+   *   **Process P0 (Original Parent):**
+      *   First `fork()` returns P1's PID (>0). `x` starts at 5.
+      *   Enters the first `else` block.
+      *   Calls `fork()` again, creating P2. This second `fork()` returns P2's PID (>0) to P0.
+      *   `x += 10;` (x becomes 15).
+      *   Enters `if(child)` because `child` holds P2's PID (>0).
+      *   `x += 5;` (x becomes 20).
+      *   Finishes with `x = 20`.
+   *   **Process P2 (Second Child):**
+      *   Created by the second `fork()` call within P0's `else` block. This second `fork()` returns 0 to P2.
+      *   Inherits `x = 5` from P0 *at the point of the second fork*.
+      *   Continues execution in the `else` block after the second `fork()`.
+      *   `x += 10;` (x becomes 15).
+      *   Does *not* enter `if(child)` because `child` is 0 for P2.
+      *   Finishes with `x = 15`.
+
+   Summary:
+   *   Number of copies of `x`: **3**
+   *   Final values: **P0: 20, P1: 10, P2: 15**
+
+10. What is the output of the following programs? (Please try to solve the problem without
+    compiling and running the programs.)
+
+       // Program 1
+       main() {
+           int val = 5;
+           int pid;
+           if (pid = fork()) // Parent: pid = child_pid (>0), true. Child: pid = 0, false.
+               wait(pid);    // Parent waits here.
+           val++;            // Child executes this first, then Parent executes it later.
+           printf("%d\n", val); // Child prints, then Parent prints.
+           return val;
+       }
+
+       // Program 2:
+       main() {
+           int val = 5;
+           int pid;
+           if (pid = fork()) // Parent: pid = child_pid (>0), true. Child: pid = 0, false.
+               wait(pid);    // Parent waits here.
+           else
+               exit(val);    // Child exits immediately with value 5.
+           val++;            // Only Parent executes this.
+           printf("%d\n", val); // Only Parent prints.
+           return val;
+       }
+
+    Answer:
+    *   **Program 1 Output:**
+        1.  Parent forks, `pid` becomes child's PID (>0). Parent enters `if`, calls `wait()`, and blocks.
+        2.  Child gets `pid = 0`. Child skips the `if` block.
+        3.  Child executes `val++`. `val` becomes 6.
+        4.  Child executes `printf("%d\n", val)`. Output: `6`
+        5.  Child returns/exits.
+        6.  Parent's `wait()` returns now that the child has exited.
+        7.  Parent executes `val++`. Parent's independent `val` becomes 6.
+        8.  Parent executes `printf("%d\n", val)`. Output: `6`
+        Output:
+        ```
+        6
+        6
+        ```
+
+    *   **Program 2 Output:**
+        1.  Parent forks, `pid` becomes child's PID (>0). Parent enters `if`, calls `wait()`, and blocks.
+        2.  Child gets `pid = 0`. Child enters the `else` block.
+        3.  Child executes `exit(val)`. Child terminates immediately with exit code 5. It *never* reaches the `val++` or `printf`.
+        4.  Parent's `wait()` returns now that the child has exited.
+        5.  Parent executes `val++`. Parent's `val` becomes 6.
+        6.  Parent executes `printf("%d\n", val)`. Output: `6`
+        Output:
+        ```
+        6
+        ```
+
+11. Implement a simple Linux shell in C capable of executing a sequence of programs that
+    communicate through a pipe. For example, if the user types ls | wc, your program
+    should fork off the two programs, which together will calculate the number of files in
+    the directory. For this, you will need to use several of the Linux system calls described
+    in this chapter: fork, exec, open, close, pipe, dup2, and wait. Note: You will to replace
+    stdin and stdout in the child process with the pipe file descriptors; that is the role of
+    dup2.
+
+    Answer: (Conceptual Implementation Steps - Code not provided in TXT)
+    1.  **Read Input:** Read a line of text from the user (e.g., using `fgets`).
+    2.  **Parse Command:** Split the input line into two commands based on the pipe symbol (`|`). You'll get command 1 (e.g., `ls`) and command 2 (e.g., `wc`), potentially with arguments. Need functions to parse arguments for each command (e.g., split by space).
+    3.  **Create Pipe:** Call `pipe(pipefd)` where `int pipefd[2];`. This creates a pipe. `pipefd[0]` is the read end, `pipefd[1]` is the write end. Check for errors.
+    4.  **Fork for Command 1 (Producer):** Call `pid1 = fork()`.
+        *   **Child 1 (pid1 == 0):**
+            *   `close(pipefd[0]);` // Child 1 doesn't read from the pipe.
+            *   `dup2(pipefd[1], STDOUT_FILENO);` // Redirect stdout to pipe write end. Check errors.
+            *   `close(pipefd[1]);` // Close original pipe write fd, no longer needed.
+            *   `execvp(cmd1_argv[0], cmd1_argv);` // Execute command 1 (e.g., "ls"). `execvp` searches PATH. Provide arguments correctly.
+            *   If `execvp` returns, print an error and `exit(1)`.
+        *   **Parent (pid1 > 0):** Continue to fork the second child.
+    5.  **Fork for Command 2 (Consumer):** Call `pid2 = fork()`.
+        *   **Child 2 (pid2 == 0):**
+            *   `close(pipefd[1]);` // Child 2 doesn't write to the pipe.
+            *   `dup2(pipefd[0], STDIN_FILENO);` // Redirect stdin to pipe read end. Check errors.
+            *   `close(pipefd[0]);` // Close original pipe read fd, no longer needed.
+            *   `execvp(cmd2_argv[0], cmd2_argv);` // Execute command 2 (e.g., "wc").
+            *   If `execvp` returns, print an error and `exit(1)`.
+        *   **Parent (pid2 > 0):** Continue to wait.
+    6.  **Parent Process Cleanup and Wait:**
+        *   `close(pipefd[0]);` // Parent closes its copy of the read end.
+        *   `close(pipefd[1]);` // Parent closes its copy of the write end. **Crucial** step so Child 2 gets EOF.
+        *   `waitpid(pid1, &status1, 0);` // Wait for the first child.
+        *   `waitpid(pid2, &status2, 0);` // Wait for the second child. (Order might not matter).
+    7.  **Loop:** Go back to step 1 to read the next command. Add logic to exit the shell (e.g., on "exit" command).
+
+12. Extend the shell implemented above to support foreground and background tasks, as
+    well as job control: suspend, resume, and kill.
+
+    Answer: (Conceptual Extension - Significantly more complex)
+    *   **Foreground/Background:**
+        *   Modify command parsing to detect an `&` at the end of the line.
+        *   If `&` is present (background job): After forking the child (or children in a pipe), the parent *does not* call `waitpid` immediately. Instead, it records the child's PID (or process group ID for pipes), the command line, and marks it as running in the background (e.g., in a job list). The parent then immediately prompts for the next command.
+        *   If no `&` (foreground job): The parent calls `waitpid` as before, waiting for the job to complete before prompting for the next command.
+    *   **Job List:** Maintain a data structure (e.g., array or linked list) to track background jobs (job ID, PID/PGID, status [Running, Stopped], command line).
+    *   **SIGCHLD Handling:** The parent shell needs to install a signal handler for `SIGCHLD`. This signal is sent when a child process terminates or stops. The handler should call `waitpid(-1, &status, WNOHANG | WUNTRACED)` in a loop to reap *any* terminated or stopped children non-blockingly. Based on the status returned, update the job list (mark as done or stopped) and potentially notify the user.
+    *   **Process Groups:** For pipes (`cmd1 | cmd2 &`) and potentially single commands, use `setpgid()` in the children to put them in their own process group. This makes job control easier (e.g., sending a signal to the entire pipeline). The parent should manage process groups.
+    *   **Terminal Control:** The shell needs to manage terminal control using functions like `tcgetpgrp()` and `tcsetpgrp()`. Only the foreground job's process group should be the controlling process group of the terminal. This ensures signals like `Ctrl+C` (SIGINT) and `Ctrl+Z` (SIGTSTP) go to the correct foreground job, not the shell itself (unless the shell is handling them).
+    *   **Built-in Commands:**
+        *   `jobs`: List background jobs from the job list.
+        *   `fg %jobid`: Identify the process group ID for the job. Send `SIGCONT` to the process group using `kill(-pgid, SIGCONT)`. Make this process group the foreground process group of the terminal using `tcsetpgrp()`. Wait for the job using `waitpid(-pgid, &status, WUNTRACED)`. Update job status. Restore terminal control to the shell afterwards.
+        *   `bg %jobid`: Identify the process group ID. Send `SIGCONT` using `kill(-pgid, SIGCONT)`. Mark the job as running in the background.
+        *   `kill %jobid`: Identify the PID/PGID. Send `SIGTERM` (default) or another specified signal using `kill()`.
+    *   **Signal Handling in Shell:** The shell needs to carefully handle signals like SIGINT, SIGTSTP, SIGTTIN, SIGTTOU. Often, these signals should be ignored or handled specifically by the shell, while the foreground job receives them via terminal control.
+

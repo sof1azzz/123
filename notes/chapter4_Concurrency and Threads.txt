@@ -1,0 +1,289 @@
+========================================
+Chapter 4 - Concurrency and Threads
+========================================
+
+----------------------------------------
+4.1 Thread Use Cases
+----------------------------------------
+
+1 Four Reasons to Use Threads
+
+----------------------------------------
+4.2 Thread Abstraction
+----------------------------------------
+
+1 Running, Suspending, and Resuming Threads
+
+2 Why “Unpredictable Speed”?
+
+----------------------------------------
+4.3 Simple Thread API
+----------------------------------------
+
+----------------------------------------
+4.4 Thread Data Structures and Life Cycle
+----------------------------------------
+
+1 Per-Thread State and Thread Control Block (TCB)
+    To create multiple threads and to be able to start and stop
+    each thread as needed, the operating system must allocate space in the TCB for the
+    current state of each thread’s computation: a pointer to the thread’s stack and a copy of its
+    processor registers.
+
+    Stack and Copy of processor registers.
+
+2 Shared State
+
+----------------------------------------
+4.5 Thread Life Cycle
+----------------------------------------
+
+4.5 线程生命周期 (Thread Life Cycle)
+
+线程在其生命周期中会经历一系列状态的变迁，从创建、被调度/取消调度、到最终退出。
+
+线程状态 (见图 4.9):
+
+1.  INIT (初始化):
+    *   线程创建时进入此状态。
+    *   分配并初始化线程相关的数据结构（如 TCB - 线程控制块）。
+    *   完成后，线程被放入就绪列表 (ready list)，状态变为 READY。
+
+2.  READY (就绪):
+    *   线程已准备好运行，但当前未占用处理器。
+    *   其 TCB 在就绪列表上。
+    *   寄存器值存储在 TCB 中。
+    *   调度器可以随时将 READY 状态的线程变为 RUNNING 状态（通过将 TCB 中的寄存器值加载到处理器）。
+
+3.  RUNNING (运行):
+    *   线程当前正在某个处理器上执行。
+    *   寄存器值存储在处理器中，而不是 TCB。
+    *   RUNNING -> READY 的转换方式:
+        *   抢占 (Preemption): 调度器强制剥夺处理器的使用权，保存线程寄存器到 TCB，将其移回 READY 列表，然后运行就绪列表中的下一个线程。
+        *   主动放弃 (Yield): 线程调用 yield (如 `thread_yield`) 主动放弃处理器，状态变为 READY。
+    *   注意: 一个线程可以在 READY 和 RUNNING 之间转换多次，这只影响执行速度，不影响正确性。
+    *   本书约定: RUNNING 状态的线程不在 ready list 上。 (Linux 等系统可能有不同约定)。
+
+4.  WAITING (等待):
+    *   线程正在等待某个事件发生（如 I/O 完成、锁释放、子线程结束）。
+    *   处于 WAITING 状态的线程不能运行，即使有空闲处理器。
+    *   其 TCB 不在就绪列表上，而是放在与等待事件相关的同步变量 (Synchronization Variable) 的等待列表 (waiting list) 上。
+    *   当事件发生时，操作系统或其他线程会将该 TCB 从等待列表移动到就绪列表，状态变为 READY。
+    *   例子: 父线程调用 `thread_join` 等待子线程结束，如果子线程未完成，父线程进入 WAITING 状态。
+
+5.  FINISHED (完成):
+    *   线程执行完毕，永远不会再运行。
+    *   系统可以开始回收其资源，但可能会暂时保留 TCB (例如，放在完成列表 finished list 上) 以便父线程获取其退出状态或返回值 (通过 `thread_join`)。
+    *   当线程状态不再需要时 (如返回值已被读取)，系统可以彻底删除并回收所有资源。
+
+线程状态与 TCB/寄存器位置 (见图 4.10):
+
+| 状态      | TCB 位置                             | 寄存器位置   |
+| :-------- | :----------------------------------- | :----------- |
+| INIT      | 正在创建中                           | TCB          |
+| READY     | 就绪列表 (Ready List)                | TCB          |
+| RUNNING   | 运行列表 (Running List - 逻辑概念) | 处理器       |
+| WAITING   | 同步变量的等待列表 (Waiting List)    | TCB          |
+| FINISHED  | 完成列表 (Finished List) -> 被删除   | TCB 或 已删除 |
+
+补充概念:
+
+*   空闲线程 (Idle Thread):
+    *   大多数 OS 为每个处理器维护一个低优先级的空闲线程。
+    *   当没有其他就绪线程可运行时，调度器会运行空闲线程。
+    *   现代空闲线程通常会将处理器置于低功耗睡眠模式，直到硬件中断发生。
+    *   中断唤醒处理器 -> 处理中断 -> 可能有线程变为 READY -> 调度器运行 READY 线程，否则恢复运行空闲线程 -> 再次睡眠。
+    *   这有助于节省能源，并在虚拟机环境中将 CPU 周期让给其他虚拟机。
+
+*   如何找到当前线程的 TCB? (Finding the TCB)
+    *   挑战: 多处理器环境下，简单的全局变量指针行不通。
+    *   方法1 (硬件支持): 使用硬件获取当前处理器 ID，然后在一个全局 TCB 指针数组中查找对应处理器的 TCB 指针。 (如 Intel x86)
+    *   方法2 (无硬件支持): 利用每个线程独有的栈指针 (Stack Pointer)。将 TCB 指针存储在线程栈的底部。通过对齐的栈起始地址和当前栈指针进行位掩码操作，可以定位到栈底的 TCB 指针。
+
+示例分析 (基于 threadHello 程序):
+
+*   问: 当 `thread_join(i)` 返回时，线程 i 处于什么状态？
+*   答: FINISHED。join 返回意味着线程 i 已经执行完毕并退出。其 TCB 可能在 finished list 上等待父线程读取返回值。
+
+*   问: 在单处理器上，主线程最少/最多进入 READY 状态多少次？
+*   答:
+    *   最少 2 次: 1 创建时进入 READY 被首次调度；2 为了让子线程运行，主线程必须放弃 CPU（通过时间片耗尽或在 join 时阻塞），进入 READY 或 WAITING，最终会回到 READY 被再次调度。
+    *   最多 (近乎) 无限次: 线程可能在执行过程中被频繁抢占并移回 READY 状态，理论上可能在每条指令后都被抢占。
+
+----------------------------------------
+4.6 Implementing Kernel Threads
+----------------------------------------
+
+4.6 实现内核线程 (Implementing Kernel Threads)
+
+实现线程的具体方式取决于上下文：
+
+1.  纯内核线程 (Kernel Threads):
+    *   在操作系统内核内部实现的线程。
+    *   执行内核代码，修改内核数据结构。
+    *   几乎所有现代商业操作系统都支持。 (见图 4.11)
+
+2.  内核线程与单线程用户进程:
+    *   OS 内核支持多线程，同时运行一些传统的单线程用户进程。
+    *   用户进程通过系统调用进入内核，可能与内核线程并发执行。 (见图 4.11)
+
+3.  使用内核线程的多线程用户进程:
+    *   OS 提供库和系统调用，允许用户程序在一个进程内创建和管理多个线程。
+    *   这些用户级线程执行用户代码，访问用户数据。
+    *   进行系统调用时，每个用户线程都需要一个内核中断栈，就像单线程进程一样。 (见图 4.12)
+
+4.  用户级线程 (User-level Threads): (后面章节讨论)
+    *   线程操作（创建、切换、同步等）完全在用户空间的库中实现，不涉及内核调用，以避免系统调用开销。
+
+本节重点：实现内核线程。
+
+---
+4.6.1 创建线程 (Creating a Thread - `thread_create`)
+
+目标：异步调用 `func(arg)`。
+
+    // func is a pointer to a procedure the thread will run. 
+    // arg is the argument to be passed to that procedure. 
+    void 
+    thread_create(thread_t *thread, void (*func)(int), int arg) { 
+        // Allocate TCB and stack 
+        TCB *tcb = new TCB(); 
+        thread->tcb = tcb; 
+        tcb->stack_size = INITIAL_STACK_SIZE; 
+        tcb->stack = new Stack(INITIAL_STACK_SIZE); 
+        // Initialize registers so that when thread is resumed, it will start running at 
+        // stub.  The stack starts at the top of the allocated region and grows down. 
+        tcb->sp = tcb->stack + INITIAL_STACK_SIZE; 
+        tcb->pc = stub; 
+        // Create a stack frame by pushing stub’s arguments and start address 
+        // onto the stack: func, arg 
+        *(tcb->sp) = arg; 
+        tcb->sp--; 
+        *(tcb->sp) = func; 
+        tcb->sp--; 
+        // Create another stack frame so that thread_switch works correctly. 
+        // This routine is explained later in the chapter. 
+        thread_dummySwitchFrame(tcb); 
+        tcb->state = READY; 
+        readyList.add(tcb);    // Put tcb on ready list 
+    } 
+    void 
+    stub(void (*func)(int), int arg) { 
+        (*func)(arg);           // Execute the function func() 
+        thread_exit(0);         // If func() does not call exit,  call it here. 
+    } 
+
+步骤 (见图 4.13):
+1.  分配每线程状态 (Allocate per-thread state):
+    *   为新线程分配 TCB (Thread Control Block) 和栈 (Stack)。
+
+2.  初始化每线程状态 (Initialize per-thread state):
+    *   设置 TCB 中的寄存器值，使得线程首次运行时能从特定位置开始。
+    *   目标是执行 `func(arg)`，但通常不直接启动 `func`。
+    *   将初始程序计数器 (PC) 设置为指向一个 `stub` 函数。
+    *   设置初始栈指针 (SP) 指向栈顶 (栈通常向下增长)。
+    *   在栈上构建 `stub` 函数的调用帧：压入参数 `arg` 和 `func` 的地址。
+    *   **`stub` 函数的作用**: `void stub(void (*func)(int), int arg) { (*func)(arg); thread_exit(0); }`。`stub` 调用真正的 `func`，并在 `func` 返回后（如果 `func` 没有自己调用 `thread_exit`）确保调用 `thread_exit`，防止控制流返回到无效地址。
+    *   在栈上额外压入一个用于 `thread_switch` 的**虚拟/伪造栈帧** (dummy switch frame)，确保首次切换到新线程时 `thread_switch` 的恢复逻辑能正常工作。
+
+3.  将 TCB 放入就绪列表 (Put TCB on ready list):
+    *   将线程状态设置为 READY。
+    *   将新 TCB 添加到调度器的就绪列表 (readyList)，使其可以被调度运行。
+
+---
+4.6.2 删除线程 (Deleting a Thread - `thread_exit`)
+
+线程调用 `thread_exit` 时：
+
+步骤：
+1.  从调度器的可运行集合中移除（不再调度）。
+2.  释放该线程分配的每线程状态（TCB、栈）。
+
+重要技巧/难点：
+*   **线程不能自己释放自己的状态！**
+*   原因：如果在释放过程中（特别是释放栈后）发生中断或切换，代码可能无法继续执行，导致资源泄露或写入已释放内存造成内存损坏（非常难调试的 bug）。
+*   **解决方案**:
+    *   调用 `thread_exit` 的线程将自己的状态设置为 FINISHED。
+    *   将自己的 TCB 从就绪列表移动到一个完成列表 (finished list)。
+    *   执行 `thread_switch` 切换到另一个就绪线程。
+    *   之后，由**其他某个正在运行的线程**（通常是调度器或 `thread_yield` 中的清理代码）来检查完成列表，并安全地释放已完成线程的 TCB 和栈。
+
+---
+4.6.3 线程上下文切换 (Thread Context Switch)
+
+定义：暂停当前运行线程的执行，保存其状态，并恢复执行另一个线程（恢复其状态）。
+
+关键问题：
+*   什么触发切换？
+*   自愿切换如何工作？
+*   非自愿切换有何不同？
+*   调度器如何选择下一个线程？ (策略问题，见第 7 章)
+
+分离机制与策略 (Separating mechanism from policy):
+*   一个重要的 OS 设计原则。
+*   机制 (Mechanism): 如何完成某项任务（如线程切换）。
+*   策略 (Policy): 决定何时以及如何使用该机制（如调度算法）。
+*   优点：易于修改策略以适应新需求或技术，而无需改变底层机制。
+
+触发内核线程切换的事件：
+1.  **自愿 (Voluntary)**: 线程调用库函数主动放弃 CPU。
+    *   `thread_yield()`: 让出 CPU 给就绪列表中的下一个线程。
+    *   `thread_join()`: 等待其他线程结束，可能阻塞当前线程。
+    *   `thread_exit()`: 终止当前线程。
+2.  **非自愿 (Involuntary)**: 由中断或处理器异常触发。
+    *   **定时器中断**: 用于实现时间片轮转，防止线程独占 CPU。中断处理程序保存当前线程状态，选择并切换到下一个线程。
+    *   **I/O 中断**: 设备（键盘、网络、磁盘）完成操作时产生中断。中断处理程序保存当前线程状态，处理 I/O 结果（可能将等待该 I/O 的线程从 WAITING 变为 READY），然后决定是恢复被中断的线程还是切换到一个（可能优先级更高的）新就绪线程。
+    *   **处理器异常**: 如缺页中断等。
+
+**切换过程中的中断处理**:
+*   在执行线程切换的关键代码段（如 `thread_switch`）时，需要**暂时禁用中断**，防止在切换中途被中断打断，导致状态不一致（例如，准备切换到的高优先级线程已被移出就绪列表，但中断处理程序切换到了一个中优先级线程，导致高优先级线程处于“ limbo”状态）。
+*   切换完成后再**重新启用中断**。
+
+**自愿内核线程上下文切换 (`thread_yield`) (见图 4.14):**
+1.  `disableInterrupts()`: 关闭中断。
+2.  `chosenTCB = readyList.getNextThread()`: 从就绪列表选择下一个线程。
+3.  如果 `chosenTCB` 非空:
+    *   将当前运行线程 (`runningThread`) 的状态设为 READY。
+    *   将 `runningThread` 的 TCB 添加回 `readyList`。
+    *   调用 `thread_switch(runningThread, chosenTCB)` 执行实际切换。
+    *   **(切换后)** 当原线程稍后被重新调度并从 `thread_switch` 返回时，将其状态设回 RUNNING。
+4.  **(可选)** 清理完成列表: 检查 `finishedList`，释放已完成线程的资源。
+5.  `enableInterrupts()`: 重新开启中断。
+
+**`thread_switch(oldThreadTCB, newThreadTCB)` (x86 示例):**
+*   在 `oldThread` 的上下文中被调用，但在 `newThread` 的上下文中返回。
+*   `pushad`: 将 `oldThread` 的通用寄存器压入其当前栈。
+*   `oldThreadTCB->sp = %esp`: 保存 `oldThread` 的栈指针到其 TCB。
+*   `%esp = newThreadTCB->sp`: 将处理器的栈指针切换到 `newThread` 的栈。
+*   `popad`: 从 `newThread` 的栈中弹出寄存器值，恢复 `newThread` 的寄存器状态。
+*   `return`: 返回。此时 PC 指向 `newThread` 之前被挂起时的下一条指令地址（存储在其栈上的返回地址）。
+
+**非自愿内核线程上下文切换 (Involuntary Switch via Interrupt/Exception):**
+*   与用户态->内核态切换的主要区别：
+    *   **无需模式切换**: 已经是内核态。
+    *   **无需切换栈**: 可以直接使用当前被中断线程的内核栈来保存状态和运行处理程序。
+*   步骤：
+    1.  **保存状态**: 硬件自动保存部分寄存器（如 PC, Flags），软件（处理程序）保存其他需要的寄存器到当前栈。
+    2.  **运行处理程序**: 执行中断/异常处理代码。
+    3.  **恢复状态**: 处理程序可以选择：
+        *   恢复被中断线程的状态，返回继续执行。
+        *   切换到另一个就绪线程：可以通过调用 `thread_switch`（或类似机制）来实现。
+*   **优化**: 可以让 `thread_switch` 保存/恢复寄存器的格式与中断硬件完全一致。这样，无论是从中断返回还是从 `thread_switch` 返回，恢复线程状态的操作都统一为从栈上弹出中断帧（例如，x86 使用 `iret` 指令）。
+
+---
+零线程内核 (Zero-thread kernel):
+*   一种可能的（较旧的）内核设计方式。
+*   内核本身没有持续运行的“线程”。
+*   所有内核活动都是事件驱动的：响应中断、异常或系统调用。
+*   处理过程在固定的内核栈（中断栈）上执行，完成后直接返回用户态（可能切换到不同的用户进程）。
+*   不需要 TCB 来跟踪内核自身的计算状态。
+
+----------------------------------------
+4.7 Combining Kernel Threads and Single-Threaded User Processes
+----------------------------------------
+
+----------------------------------------
+4.8 Implementing Multi-Threaded Processes
+----------------------------------------
+
+4.9 Alternative Abstractions

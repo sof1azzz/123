@@ -1,0 +1,238 @@
+程序崩溃原因与分析
+
+1. 程序试图访问的虚拟地址
+地址值: 0xc0000008
+原因不允许访问:
+- 该地址位于内核空间，超出了用户空间的合法范围
+- Pintos中PHYS_BASE宏定义为0xc0000000，标记用户空间与内核空间的分界线
+- 用户进程只能访问低于PHYS_BASE的地址，超出此范围会触发权限错误
+
+2. 导致崩溃的指令虚拟地址
+崩溃指令地址: 0x8048915
+
+3. 反汇编分析
+0804890f <_start>:
+ 804890f:  55                push   %ebp
+ 8048910:  89 e5             mov    %esp,%ebp
+ 8048912:  83 ec 18          sub    $0x18,%esp
+ 8048915:  8b 45 0c          mov    0xc(%ebp),%eax  <- 崩溃点
+ 8048918:  89 44 24 04       mov    %eax,0x4(%esp)
+ 804891c:  8b 45 08          mov    0x8(%ebp),%eax
+ 804891f:  89 04 24          mov    %eax,(%esp)
+ 8048922:  e8 6d f7 ff ff    call   8048094 <main>
+ 8048927:  89 04 24          mov    %eax,(%esp)
+ 804892a:  e8 d4 22 00 00    call   804ac03 <exit>
+
+崩溃函数: _start
+崩溃指令: mov 0xc(%ebp),%eax
+
+4. 函数C代码
+_start函数通常位于entry.c中，负责设置环境并调用main函数：
+void _start(void) {
+    // 获取参数并传递给main
+    int argc = ...;
+    char **argv = ...;
+    int ret = main(argc, argv);
+    exit(ret);
+}
+
+5. 指令分析
+- push %ebp: 保存上一个栈帧基址
+- mov %esp,%ebp: 设置新栈帧基址
+- sub $0x18,%esp: 为局部变量分配24字节空间
+- mov 0xc(%ebp),%eax: 尝试获取envp参数，导致非法访问
+- 后续指令: 为main函数准备参数并调用，最终调用exit
+
+6. 访问0xc0000008的深层原因
+- %ebp值为0xbffffffc (从错误输出可见)
+- 指令尝试访问0xc(%ebp) = 0xbffffffc + 0xc = 0xc0000008
+- 该地址已超出PHYS_BASE (0xc0000000)，进入内核空间
+- 用户程序无权访问内核空间，触发页错误
+- 这说明程序启动时栈未正确初始化，缺少必要的argv和envp参数
+
+错误信息"rights violation error reading page in user context"表明用户进程试图读取没有访问权限的内存区域，这与Pintos的地址空间保护机制一致。
+
+
+1. 当前运行process_execute的线程的名字和地址
+
+线程名：main
+线程地址：0xc000e000
+
+2. 当前Pintos中存在的所有线程及其struct thread内容
+
+线程1（main线程）
+#0: 0xc000e000 {
+  tid = 1,
+  status = THREAD_RUNNING,
+  name = "main", '\000' <repeats 11 times>,
+  stack = 0xc000edbc "\335\322\002\300\n",
+  priority = 31,
+  allelem = {prev = 0xc003b19c <all_list>, next = 0xc0104020},
+  elem = {prev = 0xc003b18c <fifo_ready_list>, next = 0xc003b194 <fifo_ready_list+8>},
+  pcb = 0xc010500c,
+  magic = 3446325067
+}
+
+线程2（idle线程）
+#1: 0xc0104000 {
+  tid = 2,
+  status = THREAD_BLOCKED,
+  name = "idle", '\000' <repeats 11 times>,
+  stack = 0xc0104f14 "",
+  priority = 0,
+  allelem = {prev = 0xc000e020, next = 0xc003b1a4 <all_list+8>},
+  elem = {prev = 0xc003b18c <fifo_ready_list>, next = 0xc003b194 <fifo_ready_list+8>},
+  pcb = 0x0,
+  magic = 3446325067
+}
+
+3. 当前线程的backtrace（GDB回溯）
+
+(gdb) bt
+#0  sema_init (sema=0xc003cbb4 <temporary>, value=0) at ../../threads/synch.c:45
+#1  0xc002d44e in process_execute (file_name=0xc0007d50 "do-nothing") at ../../userprog/process.c:57
+#2  0xc0020a62 in run_task (argv=0xc003b08c <argv+12>) at ../../threads/init.c:315
+#3  0xc0020ba4 in run_actions (argv=0xc003b08c <argv+12>) at ../../threads/init.c:388
+#4  0xc0020421 in main () at ../../threads/init.c:136
+
+pintos-debug: dumplist #0: 0xc000e000 {tid = 1, status = THREAD_BLOCKED, name = "main", '\000' <repeats 11 times>, stack = 0xc000ee7c "", priority = 31,
+  allelem = {prev = 0xc003b19c <all_list>, next = 0xc0104020}, elem = {prev = 0xc003cbb8 <temporary+4>, next = 0xc003cbc0 <temporary+12>},
+  pcb = 0xc010500c, magic = 3446325067}
+pintos-debug: dumplist #1: 0xc0104000 {tid = 2, status = THREAD_BLOCKED, name = "idle", '\000' <repeats 11 times>, stack = 0xc0104f14 "", priority = 0,
+  allelem = {prev = 0xc000e020, next = 0xc010b020}, elem = {prev = 0xc003b18c <fifo_ready_list>, next = 0xc003b194 <fifo_ready_list+8>}, pcb = 0x0,
+  magic = 3446325067}
+pintos-debug: dumplist #2: 0xc010b000 {tid = 3, status = THREAD_RUNNING, name = "do-nothing\000\000\000\000\000", stack = 0xc010bfd4 "", priority = 31,
+  allelem = {prev = 0xc0104020, next = 0xc003b1a4 <all_list+8>}, elem = {prev = 0xc003b18c <fifo_ready_list>, next = 0xc003b194 <fifo_ready_list+8>},
+  pcb = 0x0, magic = 3446325067}
+
+
+
+
+4. 
+Step through the start_process function until you have stepped over the call to load. Note that load sets the eip and esp fields in the if_ structure. Print out the value of the if_ structure, displaying the values in hex (hint: print/x if_).
+
+Pintos中iret前后寄存器对比 —— 内核态与用户态的区别
+
+一、背景
+-----------------
+在Pintos等x86操作系统中，内核通过iret指令从内核态切换到用户态。切换前后，CPU的寄存器内容会发生明显变化，主要体现在段寄存器（cs、ss）、指令指针（eip）、栈指针（esp）等。
+
+二、iret执行前（内核态）
+-----------------
+此时CPU正在执行内核线程，寄存器内容如下（示例）：
+
+cs  = 0x8      // 内核代码段选择子（特权级0）
+ss  = 0x10     // 内核数据段选择子（特权级0）
+ds  = 0x10     // 内核数据段
+es  = 0x10
+fs  = 0x10
+gs  = 0x10
+eip = 0xc002d609   // 当前执行的内核代码地址
+esp = 0xc010bf38   // 内核栈顶
+ebp = 0xc010bfc0   // 内核栈帧基址
+eflags = 0x246     // 标志寄存器
+（其他通用寄存器略）
+
+三、iret准备阶段
+-----------------
+内核会准备一个struct intr_frame（如if_），其中保存了用户程序需要的寄存器快照：
+
+if_ = {
+  eip = 0x804890f   // 用户程序入口地址
+  cs  = 0x1b        // 用户代码段选择子（特权级3）
+  eflags = 0x202    // 用户程序初始eflags
+  esp = 0xc0000000  // 用户栈顶（应为PHYS_BASE以下）
+  ss  = 0x23        // 用户数据段选择子（特权级3）
+  ds  = 0x23
+  es  = 0x23
+  fs  = 0x23
+  gs  = 0x23
+  ...（其他寄存器）
+}
+
+四、iret执行后（用户态）
+-----------------
+iret指令会从栈上弹出eip、cs、eflags、esp、ss等，CPU自动切换到用户态，寄存器内容如下（示例）：
+
+cs  = 0x1b     // 用户代码段选择子（特权级3）
+ss  = 0x23     // 用户数据段选择子（特权级3）
+ds  = 0x23
+es  = 0x23
+fs  = 0x23
+gs  = 0x23
+eip = 0x804890f    // 跳转到用户程序入口
+esp = 0xc0000000   // 用户栈顶
+ebp = 0x0          // 用户程序初始栈帧基址
+eflags = 0x202     // 用户程序eflags
+（其他通用寄存器根据if_内容恢复）
+
+五、内核态与用户态的本质区别
+-----------------
+1. 段选择子（cs/ss等）最低2位（RPL）不同：
+   - 内核态：0（Ring 0，最高特权级）
+   - 用户态：3（Ring 3，最低特权级）
+
+2. 指令指针（eip）和栈指针（esp）指向的地址空间不同：
+   - 内核态：高地址，内核代码和内核栈
+   - 用户态：用户空间地址，用户代码和用户栈
+
+3. 只有内核态能执行特权指令，用户态受限，不能直接访问硬件和内核空间。
+
+六、总结
+-----------------
+- iret前，CPU处于内核态，寄存器反映内核线程状态。
+- iret后，CPU根据if_内容切换到用户态，寄存器反映用户进程初始状态。
+- 这种切换是x86硬件提供的安全机制，保证了内核和用户空间的隔离。
+
+5.
+The first instruction in the asm volatile statement sets the stack pointer to the bottom of the if_ structure. The second one jumps to intr_exit. The comments in the code explain what’s happening here. Step into the asm volatile statement, and then step through the instructions. As you step through the iret instruction, observe that the function “returns” into userspace. Why does the processor switch modes when executing this function? Feel free to explain this in terms of the values in memory and/or registers at the time iret is executed, and the functionality of the iret instruction.
+
+答案和4差不多
+
+6.
+Once you’ve executed iret, type info registers to print out the contents of registers. Include the output of this command on Gradescope. How do these values compare to those when you printed out if_?
+
+执行iret后，info registers显示的eip、cs、eflags、esp、ss、ds、es、fs、gs等寄存器的值，与if_结构体中的内容完全一致。这是因为iret会从if_结构体（栈）中恢复这些寄存器，实现从内核态到用户态的切换。
+
+7.
+Notice that if you try to get your current location with backtrace you’ll only get a hex address. This is because because the debugger only loads in the symbols from the kernel. Now that we are in userspace, we have to load in the symbols from the Pintos executable we are running, namely do-nothing. To do this, use loadusersymbols tests/userprog/do-nothing. Now, using backtrace, you’ll see that you’re currently in the _start function. Using the disassemble and stepi commands, step through userspace instruction by instruction until the page fault occurs. At this point, the processor has immediately entered kernel mode to handle the page fault, so backtrace will show the current stack in kernel mode, not the user stack at the time of the page fault. However, you can use btpagefault to find the user stack at the time of the page fault. Copy down the output of btpagefault.
+
+(gdb) btpagefault
+#0  0xc010bfc0 in ?? ()
+#1  0xc00221ea in intr_handler (frame=0xc010bfb0) at ../../threads/interrupt.c:339
+#2  0xc0022449 in intr_entry () at ../../threads/intr-stubs.S:37
+#3  0xc010bfb0 in ?? ()
+#4  0x08048915 in _start (argc=-268370093, argv=0xf000ff53) at ../../lib/user/entry.c:6
+Backtrace stopped: previous frame inner to this frame (corrupt stack?)
+(gdb) 
+
+
+Autograder test 1:
+    /home/workspace/code/personal/proj-pregame/src/userprog/process.c 
+    line:476
+    否则访问argc, argv, envi超出 PHYS_BASE  --->  ((void*)0xc0000000)
+    *esp = PHYS_BASE;   ------->     *esp = PHYS_BASE - 0xc;
+
+Autograder test 2:
+  (gdb) print/x if_
+  $3 = {edi = 0x0, esi = 0x0, ebp = 0x0, esp_dummy = 0x0, ebx = 0x0, edx = 0x0, ecx = 0x0, eax = 0x0, gs = 0x23, fs = 0x23, es = 0x23, ds = 0x23, vec_no = 0x0,
+  error_code = 0x0, frame_pointer = 0x0, eip = 0x804890d, cs = 0x1b, eflags = 0x202, esp = 0xbffffff4, ss = 0x23}
+
+  (gdb) info r
+  eax            0x0                 0
+  ecx            0x0                 0
+  edx            0x0                 0
+  ebx            0x0                 0
+  esp            0xbffffff4          0xbffffff4
+  ebp            0x0                 0x0
+  esi            0x0                 0
+  edi            0x0                 0
+  eip            0x804890d           0x804890d
+  eflags         0x202               [ IF ]
+  cs             0x1b                27
+  ss             0x23                35
+  ds             0x23                35
+  es             0x23                35
+  fs             0x23                35
+  gs             0x23                35
+

@@ -214,25 +214,73 @@ Autograder test 1:
     *esp = PHYS_BASE;   ------->     *esp = PHYS_BASE - 0xc;
 
 Autograder test 2:
-  (gdb) print/x if_
-  $3 = {edi = 0x0, esi = 0x0, ebp = 0x0, esp_dummy = 0x0, ebx = 0x0, edx = 0x0, ecx = 0x0, eax = 0x0, gs = 0x23, fs = 0x23, es = 0x23, ds = 0x23, vec_no = 0x0,
-  error_code = 0x0, frame_pointer = 0x0, eip = 0x804890d, cs = 0x1b, eflags = 0x202, esp = 0xbffffff4, ss = 0x23}
+  /home/workspace/code/personal/proj-pregame/src/userprog/process.c 
+    line:129
 
-  (gdb) info r
-  eax            0x0                 0
-  ecx            0x0                 0
-  edx            0x0                 0
-  ebx            0x0                 0
-  esp            0xbffffff4          0xbffffff4
-  ebp            0x0                 0x0
-  esi            0x0                 0
-  edi            0x0                 0
-  eip            0x804890d           0x804890d
-  eflags         0x202               [ IF ]
-  cs             0x1b                27
-  ss             0x23                35
-  ds             0x23                35
-  es             0x23                35
-  fs             0x23                35
-  gs             0x23                35
+  高地址
++-----------------+
+| argv 字符串内容  |
++-----------------+
+| 其他字符串      |
++-----------------+
+| argv[argc-1]    | <- 指向最后一个参数
++-----------------+
+| ...             |
++-----------------+
+| argv[0]         | <- 指向程序名
++-----------------+
+| NULL            | <- argv 数组结束标记
++-----------------+
+| argv            | <- ebp+12 (0xc)，指向 argv 数组
++-----------------+
+| argc (1)        | <- ebp+8
++-----------------+
+| 返回地址        | <- ebp+4
++-----------------+
+| 旧的 ebp        | <- ebp
++-----------------+
+低地址
 
+  movel 0x8(%ebp), ...
+  这个move就是我们要的argc
+
+  (操你妈的原来返回地址我们需要自己入栈
+  先入argv, 然后argc，然后还有个返回地址)
+
+  argv这题不用管，所以先push argc = 1
+  再push 一个随意的4bytes，充当填位的返回地址。
+
+
+  if_.esp -= sizeof(int);
+  *(int *)if_.esp = 1;
+
+  /* 放置虚假返回地址 */
+  if_.esp -= sizeof(void *);
+  *(void **)if_.esp = 0;
+
+
+
+
+在
+Autograder test 1:
+    /home/workspace/code/personal/proj-pregame/src/userprog/process.c 
+    line:476
+    否则访问argc, argv, envi超出 PHYS_BASE  --->  ((void*)0xc0000000)
+    *esp = PHYS_BASE;   ------->     *esp = PHYS_BASE - 0xc;
+
+这里面，我把stack默认先减了0xc，以后应该要继续修改（根据argv所需大小）
+
+然后在 start_process：129 里面我直接
+if_.esp -= sizeof(int);
+  *(int *)if_.esp = 1;
+
+  /* 放置虚假返回地址 */
+  if_.esp -= sizeof(void *);
+  *(void **)if_.esp = 0;
+这边栈又减了2次4
+  
+Autograder test 3:
+argc必须是1，所以已经做好了
+
+
+4.

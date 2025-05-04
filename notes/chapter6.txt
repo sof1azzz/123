@@ -1,0 +1,33 @@
+第六章 多对象同步（Multi-Object Synchronization）
+
+6.1 多处理器锁性能
+
+多核心竞争同一锁会导致缓存一致性协议频繁操作，带来性能问题。
+
+"锁膨胀"（Lock Convoy）会导致其他线程被迫排队等待。
+
+6.2 锁设计模式
+
+精细粒度锁（Fine-grained Locking）：通过拆分锁提高并发性。
+
+每处理器数据结构（Per-Processor Data Structures）：减少锁冲突。
+
+所有权模型（Ownership Model）：每个数据由一个线程拥有，减少共享。
+
+分阶段架构（Staged Event-Driven Architecture, SEDA）：将系统操作拆成多个阶段分别处理，模块之间使用队列通信。
+
+6.3 锁竞争解决方案
+
+MCS 锁（Mellor-Crummey and Scott Lock）：队列式自旋锁，避免繁忙等待时的缓存抖动。
+
+RCU（Read-Copy-Update）机制：读者无需加锁，写操作复制并更新，适用于读多写少的情况。
+
+6.4 多对象原子性
+
+单锁难以满足跨多个共享数据结构的原子性需求。
+
+解决方案包括：
+
+两阶段锁协议（Two-phase locking）
+
+事务内存（Transactional Memory）：由硬件或软件控制并发冲突，简化并发编程。

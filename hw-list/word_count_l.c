@@ -26,32 +26,72 @@
 
 #include "word_count.h"
 
-void init_words(word_count_list_t* wclist) { /* TODO */
+void init_words(word_count_list_t *wclist) { /* TODO */
+  list_init(wclist);
 }
 
-size_t len_words(word_count_list_t* wclist) {
-  /* TODO */
-  return 0;
+size_t len_words(word_count_list_t *wclist) {
+  return list_size(wclist);
 }
 
 word_count_t* find_word(word_count_list_t* wclist, char* word) {
   /* TODO */
+  struct list_elem *e;
+
+  for (e = list_begin(wclist); e != list_end(wclist); e = list_next(e)) {
+    word_count_t *foo = list_entry(e, word_count_t, elem);
+    if (strcmp(foo->word, word) == 0) {
+      return foo;
+    }
+  }
+  /* TODO */
+
   return NULL;
 }
 
 word_count_t* add_word(word_count_list_t* wclist, char* word) {
   /* TODO */
-  return NULL;
+  word_count_t *temp = find_word(wclist, word);
+
+  if (temp) {
+    temp->count++;
+    return temp;
+  } else {
+    word_count_t *new_node = malloc(sizeof(word_count_t));
+    if (!new_node) {
+      perror("malloc new node");
+      return NULL;
+    }
+
+    new_node->word = strdup(word);
+    if (!new_node->word) {
+      perror("malloc word");
+      return NULL;
+    }
+    new_node->count = 1;
+
+    list_push_front(wclist, &new_node->elem);
+    return new_node;
+  }
 }
 
 void fprint_words(word_count_list_t* wclist, FILE* outfile) {
   /* TODO */
   /* Please follow this format: fprintf(<file>, "%i\t%s\n", <count>, <word>); */
+  struct list_elem *e;
+
+  for (e = list_begin(wclist); e != list_end(wclist); e = list_next(e)) {
+    word_count_t *foo = list_entry(e, word_count_t, elem);
+    fprintf(outfile, "%i\t%s\n", foo->count, foo->word);
+  }
 }
 
 static bool less_list(const struct list_elem* ewc1, const struct list_elem* ewc2, void* aux) {
   /* TODO */
-  return false;
+  word_count_t *w1 = list_entry(ewc1, word_count_t, elem);
+  word_count_t *w2 = list_entry(ewc2, word_count_t, elem);
+  bool (*less)(const word_count_t *, const word_count_t *) = aux;
+  return less(w1, w2);
 }
 
 void wordcount_sort(word_count_list_t* wclist,

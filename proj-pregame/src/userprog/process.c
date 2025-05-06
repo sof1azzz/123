@@ -24,7 +24,9 @@ static struct semaphore temporary;
 static thread_func start_process NO_RETURN;
 static thread_func start_pthread NO_RETURN;
 static bool load(const char* file_name, void (**eip)(void), void** esp);
-bool setup_thread(void (**eip)(void), void** esp);
+bool setup_thread(void (**eip)(void), void **esp);
+
+#define MAX_ARGS 128
 
 /* Initializes user programs in the system by ensuring the main
    thread has a minimal PCB so that it can execute and wait for
@@ -71,7 +73,9 @@ pid_t process_execute(const char* file_name) {
 
 /* A thread function that loads a user process and starts it
    running. */
-static void start_process(void* file_name_) {
+   // 参数是   ----->    包含所有argv： file_name(argv[0]), argv[1], argv[2]......
+  // 还没有进行token， token在 当前 281 行 函数 load里面进行
+static void start_process(void *file_name_) {
   char* file_name = (char*)file_name_;
   struct thread* t = thread_current();
   struct intr_frame if_;
@@ -96,7 +100,7 @@ static void start_process(void* file_name_) {
   /* Initialize interrupt frame and load executable. */
   if (success) {
     memset(&if_, 0, sizeof if_);
-    if_.gs = if_.fs = if_.es = if_.ds = if_.ss = SEL_UDSEG;
+    if_.gs = if_.fs = if_.es = if_.ds = if_.ss = SEL_UDSEG; // 用户 user mod 0x23
     if_.cs = SEL_UCSEG;
     if_.eflags = FLAG_IF | FLAG_MBS;
     success = load(file_name, &if_.eip, &if_.esp);
@@ -126,12 +130,12 @@ static void start_process(void* file_name_) {
      we just point the stack pointer (%esp) to our stack frame
      and jump to it. */
 
-  if_.esp -= sizeof(int);
-  *(int *)if_.esp = 1;
+  //if_.esp -= sizeof(int);
+  //*(int *)(if_.esp + 8) = 1;
 
   /* 放置虚假返回地址 */
   if_.esp -= sizeof(void *);
-  *(void **)if_.esp = 0;
+  *(int *)(if_.esp + 4) = 0;
   
   asm volatile("movl %0, %%esp; jmp intr_exit" : : "g"(&if_) : "memory");
   NOT_REACHED();
@@ -276,13 +280,65 @@ static bool load_segment(struct file* file, off_t ofs, uint8_t* upage, uint32_t 
    Stores the executable's entry point into *EIP
    and its initial stack pointer into *ESP.
    Returns true if successful, false otherwise. */
-bool load(const char* file_name, void (**eip)(void), void** esp) {
+   // file_name 参数是   ----->    包含所有argv： file_name(argv[0]), argv[1], argv[2]......
+     // 还没有进行token， token在 当前 281 行 函数 load里面进行
+bool load(const char *file_name, void (**eip)(void), void **esp) {
   struct thread* t = thread_current();
   struct Elf32_Ehdr ehdr;
   struct file* file = NULL;
   off_t file_ofs;
   bool success = false;
   int i;
+
+  char *saved_ptr;
+  char *token;
+  int argc = 0;
+  char *ELF_name;
+  const char *delimiters = " \t\n\r\f\v";
+  char *argv[MAX_ARGS];
+  int argv_bytes_len = 0;
+  int argv_bytes_align_needed = 0;
+  argv[MAX_ARGS - 1] = NULL;
+
+  char *fn_copy = NULL;
+  fn_copy = palloc_get_page(0);
+  if (fn_copy == NULL) {
+    printf("load: Failed to allocate fn_copy\n");
+    //palloc_free_page(fn_copy);      // 记得 free 在done里面free
+    goto done;
+  }
+  strlcpy(fn_copy, file_name, PGSIZE);
+
+  token = __strtok_r(fn_copy, delimiters, &saved_ptr);
+  if (token == NULL) {
+    printf("load: 你鸡巴传了个什么鬼东西?\n");
+    goto done;
+  }
+
+  ELF_name = token;
+  // 记得加'\0'
+  argv_bytes_len += strlen(token) + 1;
+  argv[0] = ELF_name;
+  argc++;
+
+  // strtok_r 第一个参数是 NULL !
+  while ((token = __strtok_r(NULL, delimiters, &saved_ptr)) != NULL
+    && argc < MAX_ARGS - 1) {
+    argv[argc] = token;
+    // 记得加'\0'
+    argv_bytes_len += strlen(token) + 1;
+    argc++;
+  }
+
+  // 这边边界大小 目前不是很确定
+  if (argv_bytes_len + 4 * argc + 4 + 4 > MAX_STACK_PAGES) {
+    printf("load: Too many argv, the max stack size is %d\n", MAX_STACK_PAGES);
+    goto done;
+  }
+
+  argv[argc] = NULL;
+  // 外层再套一个mod，防止出现 16 - 0 = 16
+  argv_bytes_align_needed = (16 - (argv_bytes_len % 16)) % 16;
 
   /* Allocate and activate page directory. */
   t->pcb->pagedir = pagedir_create();
@@ -291,9 +347,9 @@ bool load(const char* file_name, void (**eip)(void), void** esp) {
   process_activate();
 
   /* Open executable file. */
-  file = filesys_open(file_name);
+  file = filesys_open(ELF_name);
   if (file == NULL) {
-    printf("load: %s: open failed\n", file_name);
+    printf("load: %s: open failed\n", ELF_name);
     goto done;
   }
 
@@ -301,7 +357,7 @@ bool load(const char* file_name, void (**eip)(void), void** esp) {
   if (file_read(file, &ehdr, sizeof ehdr) != sizeof ehdr ||
       memcmp(ehdr.e_ident, "\177ELF\1\1\1", 7) || ehdr.e_type != 2 || ehdr.e_machine != 3 ||
       ehdr.e_version != 1 || ehdr.e_phentsize != sizeof(struct Elf32_Phdr) || ehdr.e_phnum > 1024) {
-    printf("load: %s: error loading executable\n", file_name);
+    printf("load: %s: error loading executable\n", ELF_name);
     goto done;
   }
 
@@ -354,7 +410,7 @@ bool load(const char* file_name, void (**eip)(void), void** esp) {
         break;
     }
   }
-
+  
   /* Set up stack. */
   if (!setup_stack(esp))
     goto done;
@@ -367,6 +423,7 @@ bool load(const char* file_name, void (**eip)(void), void** esp) {
 done:
   /* We arrive here whether the load is successful or not. */
   file_close(file);
+  palloc_free_page(fn_copy);  // free
   return success;
 }
 
@@ -481,7 +538,7 @@ static bool setup_stack(void** esp) {
   if (kpage != NULL) {
     success = install_page(((uint8_t*)PHYS_BASE) - PGSIZE, kpage, true);
     if (success)
-      *esp = PHYS_BASE - 0xc;
+      *esp = PHYS_BASE;
     else
       palloc_free_page(kpage);
   }

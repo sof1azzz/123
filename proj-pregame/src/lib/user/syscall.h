@@ -4,6 +4,9 @@
 #include <stdbool.h>
 #include <debug.h>
 #include <pthread.h>
+//#include "pthread.h"
+//#include "threads/thread.h"
+
 
 /* Process identifier. */
 typedef int pid_t;

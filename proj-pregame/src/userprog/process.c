@@ -19,6 +19,7 @@
 #include "threads/synch.h"
 #include "threads/thread.h"
 #include "threads/vaddr.h"
+#include "userprog/pagedir.h"
 
 static struct semaphore temporary;
 static thread_func start_process NO_RETURN;
@@ -55,6 +56,8 @@ void userprog_init(void) {
 pid_t process_execute(const char* file_name) {
   char* fn_copy;
   tid_t tid;
+  //char *save_ptr;
+ // char *file_name_for_thread_create;
 
   sema_init(&temporary, 0);
   /* Make a copy of FILE_NAME.
@@ -64,8 +67,17 @@ pid_t process_execute(const char* file_name) {
     return TID_ERROR;
   strlcpy(fn_copy, file_name, PGSIZE);
 
+  // 这边只能这样补救一下了，把文件名也就是argv[0]提出来。 具体parse在load函数内
+  // char command_line_for_name_parsing[PGSIZE]; // 或者一个足够大的栈缓冲区
+  // strlcpy(command_line_for_name_parsing, file_name, PGSIZE);
+
+  // file_name_for_thread_create = strtok_r(command_line_for_name_parsing, " ", &save_ptr);
+  // if (file_name_for_thread_create == NULL) { // 如果命令行是空的或只有空格
+  //   file_name_for_thread_create = ""; // 或者其他默认名/错误处理
+  // }
+
   /* Create a new thread to execute FILE_NAME. */
-  tid = thread_create(file_name, PRI_DEFAULT, start_process, fn_copy);
+  tid = thread_create(fn_copy, PRI_DEFAULT, start_process, fn_copy);
   if (tid == TID_ERROR)
     palloc_free_page(fn_copy);
   return tid;
@@ -134,8 +146,8 @@ static void start_process(void *file_name_) {
   //*(int *)(if_.esp + 8) = 1;
 
   /* 放置虚假返回地址 */
-  if_.esp -= sizeof(void *);
-  *(int *)(if_.esp + 4) = 0;
+  //if_.esp -= sizeof(void *);
+  //*(int *)(if_.esp + 4) = 0;
   
   asm volatile("movl %0, %%esp; jmp intr_exit" : : "g"(&if_) : "memory");
   NOT_REACHED();
@@ -308,8 +320,8 @@ bool load(const char *file_name, void (**eip)(void), void **esp) {
     goto done;
   }
   strlcpy(fn_copy, file_name, PGSIZE);
-
-  token = __strtok_r(fn_copy, delimiters, &saved_ptr);
+  
+  token = strtok_r(fn_copy, delimiters, &saved_ptr);
   if (token == NULL) {
     printf("load: 你鸡巴传了个什么鬼东西?\n");
     goto done;
@@ -317,12 +329,16 @@ bool load(const char *file_name, void (**eip)(void), void **esp) {
 
   ELF_name = token;
   // 记得加'\0'
+
+  // 补救措施。 因为在execute_process里面我们没有正确的把argv[0]赋值给process_name
+  strlcpy(thread_current()->pcb->process_name, ELF_name, sizeof(thread_current()->pcb->process_name));
+
   argv_bytes_len += strlen(token) + 1;
   argv[0] = ELF_name;
   argc++;
 
   // strtok_r 第一个参数是 NULL !
-  while ((token = __strtok_r(NULL, delimiters, &saved_ptr)) != NULL
+  while ((token = strtok_r(NULL, delimiters, &saved_ptr)) != NULL
     && argc < MAX_ARGS - 1) {
     argv[argc] = token;
     // 记得加'\0'
@@ -330,15 +346,13 @@ bool load(const char *file_name, void (**eip)(void), void **esp) {
     argc++;
   }
 
-  // 这边边界大小 目前不是很确定
-  if (argv_bytes_len + 4 * argc + 4 + 4 > MAX_STACK_PAGES) {
+  // 这边边界大小 目前不是很确定   一堆参数，下面有注释
+  if (argv_bytes_len + 4 * argc + 4 + 4 + 4 + 4 > MAX_STACK_PAGES) {
     printf("load: Too many argv, the max stack size is %d\n", MAX_STACK_PAGES);
     goto done;
   }
 
   argv[argc] = NULL;
-  // 外层再套一个mod，防止出现 16 - 0 = 16
-  argv_bytes_align_needed = (16 - (argv_bytes_len % 16)) % 16;
 
   /* Allocate and activate page directory. */
   t->pcb->pagedir = pagedir_create();
@@ -414,6 +428,51 @@ bool load(const char *file_name, void (**eip)(void), void **esp) {
   /* Set up stack. */
   if (!setup_stack(esp))
     goto done;
+
+  char *argv_start_addr[MAX_ARGS];
+  char *curr_esp_addr = *esp;
+  int k_loop;
+
+  for (k_loop = argc - 1; k_loop >= 0; k_loop--) {
+    int curr_argv_len = strlen(argv[k_loop]) + 1;
+    curr_esp_addr -= curr_argv_len;
+    memcpy(curr_esp_addr, argv[k_loop], curr_argv_len);
+    argv_start_addr[k_loop] = curr_esp_addr;
+  }
+
+  // 所有的argv，argc，还有虚拟return地址所需bytes
+  // argv_bytes_len + 4 (argv[argc]为NULL) + 4 (argv) + 4 (argc)  + 
+  // 4 * argc(每个argv[i])    不包含虚拟返回地址， 此时需要满足 16 对齐
+  argv_bytes_align_needed = (16 - (argv_bytes_len + 4 + 4 + 4 + 4 * argc) % 16) % 16;
+  for (k_loop = argv_bytes_align_needed; k_loop > 0; k_loop--) {
+    curr_esp_addr--;
+    *(uint8_t *)curr_esp_addr = 0; // 每个 0 只占 1 byte
+  }
+
+  // 设置 argv[argc] = NULL (4 bytes)
+  curr_esp_addr -= sizeof(char *);
+  *(char **)curr_esp_addr = 0;  // 这两个等价， 反正填一个 4 bytes 的 0 
+  //*(uint32_t *)curr_esp_addr = (uint32_t)0;
+
+  for (k_loop = argc - 1; k_loop >= 0; k_loop--) {
+    curr_esp_addr -= sizeof(char *);
+    *(char **)curr_esp_addr = argv_start_addr[k_loop];
+  }
+
+  // 压入 argv 
+  char **main_argv_parameter_on_stack = (char **)curr_esp_addr;
+  curr_esp_addr -= sizeof(char **);
+  *((char ***)curr_esp_addr) = main_argv_parameter_on_stack;
+
+  // argc
+  curr_esp_addr -= sizeof(int);
+  *((int *)curr_esp_addr) = argc;
+
+  // 虚假地址
+  curr_esp_addr -= sizeof(void *);
+  *((void **)curr_esp_addr) = NULL;
+
+  *esp = curr_esp_addr;  // 改回来
 
   /* Start address. */
   *eip = (void (*)(void))ehdr.e_entry;

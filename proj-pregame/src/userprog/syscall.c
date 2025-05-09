@@ -38,7 +38,8 @@ static void syscall_handler(struct intr_frame *f UNUSED) {
 
   switch (args[0]) {
   case SYS_EXIT:  // SYS_EXIT = 1
-    f->eax = args[1];
+    //f->eax = args[1];
+    thread_current()->pcb->exit_code = args[1];
     printf("%s: exit(%d)\n", thread_current()->pcb->process_name, args[1]);
     process_exit();
     break;

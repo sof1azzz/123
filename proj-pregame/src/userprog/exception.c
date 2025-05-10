@@ -138,8 +138,34 @@ static void page_fault(struct intr_frame* f) {
   /* To implement virtual memory, delete the rest of the function
      body, and replace it with code that brings in the page to
      which fault_addr refers. */
-  printf("Page fault at %p: %s error %s page in %s context.\n", fault_addr,
-         not_present ? "not present" : "rights violation", write ? "writing" : "reading",
-         user ? "user" : "kernel");
-  kill(f);
+
+  if (user) {
+     struct thread *t = thread_current();
+
+     /* 设置进程的退出状态 */
+     if (t->pcb) {
+        t->pcb->exit_code = -1;
+
+        /* 打印错误消息，使用进程名而不是线程名 */
+        printf("%s: exit(-1)\n", t->pcb->process_name);
+
+        /* 终止进程 */
+        process_exit();
+     } else {
+        /* 如果没有PCB（不太可能），使用线程名 */
+        printf("%s: exit(-1)\n", t->name);
+        thread_exit();
+     }
+  } else {
+     /* 内核模式页错误 - 这是一个严重错误 */
+     printf("Page fault at %p: %s error %s page in %s context.\n", fault_addr,
+        not_present ? "not present" : "rights violation",
+        write ? "writing" : "reading",
+        user ? "user" : "kernel");
+     kill(f);  /* 对于内核错误，使用原来的kill函数 */
+  }
+//   printf("Page fault at %p: %s error %s page in %s context.\n", fault_addr,
+//          not_present ? "not present" : "rights violation", write ? "writing" : "reading",
+//          user ? "user" : "kernel");
+//   kill(f);
 }

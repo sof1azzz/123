@@ -33,6 +33,19 @@ struct file* file_reopen(struct file* file) {
   return file_open(inode_reopen(file->inode));
 }
 
+struct file *file_duplicate(struct file *file) {
+  struct file *new_file = malloc(sizeof(struct file));
+  if (new_file == NULL) return NULL;
+
+  // 复制文件结构
+  *new_file = *file;
+
+  // 增加inode引用计数（如果需要）
+  inode_reopen(file->inode);
+
+  return new_file;
+}
+
 /* Closes FILE. */
 void file_close(struct file* file) {
   if (file != NULL) {

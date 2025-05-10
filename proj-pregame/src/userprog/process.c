@@ -21,6 +21,7 @@
 #include "threads/vaddr.h"
 #include "userprog/pagedir.h"
 #include "lib/string.h"
+#include "threads/pte.h"
 
 //static struct semaphore temporary;
 static thread_func start_process NO_RETURN;
@@ -118,7 +119,7 @@ pid_t process_execute(const char *file_name_with_args) {
     printf("process_execute: fn_copy palloc_get_page failed\n");
     return TID_ERROR; // 内存分配失败
   }
-  strlcpy(fn_copy, file_name_with_args, PGSIZE);
+  strlcpy(fn_copy, file_name_with_args, strlen(file_name_with_args) + 1);
   aux.file_name_with_args = fn_copy;
 
   /* 2. 准备可执行文件名 (exe_name) 用于 thread_create */
@@ -148,6 +149,7 @@ pid_t process_execute(const char *file_name_with_args) {
   aux.load_success = false; // 子进程 (start_process) 会在加载成功后将其设为 true
   aux.child_pid = TID_ERROR;  // 先设置一下
   aux.parent_pcb = thread_current()->pcb; // <--- 新增：设置父进程的PCB
+  //aux.parent_if = &thread_current()->if_; // 设置父进程中断帧
 
   /* 4. 创建新线程以启动子进程 */
   // token (可执行文件名) 作为新线程的名称
@@ -189,8 +191,6 @@ pid_t process_execute(const char *file_name_with_args) {
       lock_acquire(&current_parent_pcb->process_lock);
       list_push_back(&current_parent_pcb->children_list, &child_tracker->elem);
       lock_release(&current_parent_pcb->process_lock);
-
-
 
       result_pid = aux.child_pid; // 设置函数返回值为子进程的PID
     } else {
@@ -513,6 +513,279 @@ void process_activate(void) {
      This does nothing if this is not a user process. */
   tss_update();
 }
+
+// fork相关的
+static void start_fork_process(void *aux_);
+static int fork_copy_pd(struct process *child, struct process *parent) {
+  if (child == NULL || parent == NULL) {
+    return -1;
+  }
+  uint32_t *parent_pd = parent->pagedir;
+  uint32_t *child_pd = child->pagedir;
+
+  if (parent_pd == NULL || child_pd == NULL) {
+    return -1;
+  }
+
+#ifndef PDSIZE
+#define PDSIZE 1024
+#endif
+
+  // 跟踪已分配的页面，用于错误时清理
+  void **allocated_pages = NULL;
+  int page_count = 0;
+  int max_pages = 1024; // 初始大小，可根据需要调整
+
+  allocated_pages = malloc(sizeof(void *) * max_pages);
+  if (allocated_pages == NULL) {
+    return -1;
+  }
+
+  for (uint32_t pde_idx = 0; pde_idx < PDSIZE; pde_idx++) {
+    uint32_t *pde = &parent_pd[pde_idx];
+    if (*pde & PTE_P) {  // 如果页目录项存在
+      uint32_t *pt = pde_get_pt(*pde);  // 获取页表
+
+      // 遍历页表中的所有页表项
+      for (uint32_t pte_idx = 0; pte_idx < PGSIZE / sizeof(uint32_t); pte_idx++) {
+        uint32_t *pte = &pt[pte_idx];
+        if (*pte & PTE_P) {  // 如果页表项存在
+          void *upage = (void *)((pde_idx << PDSHIFT) | (pte_idx << PTSHIFT));
+
+          // 如果是用户空间的页
+          if (is_user_vaddr(upage)) {
+            // 获取物理页
+            void *kpage = pagedir_get_page(parent_pd, upage);
+            if (kpage != NULL) {
+              // 为子进程分配新的物理页
+              void *new_kpage = palloc_get_page(PAL_USER);
+              if (new_kpage == NULL) {
+                // 内存不足，释放已分配的所有页面
+                for (int i = 0; i < page_count; i++) {
+                  palloc_free_page(allocated_pages[i]);
+                }
+                free(allocated_pages);
+                return -1;
+              }
+
+              // 记录已分配的页面
+              if (page_count >= max_pages) {
+                // 扩展数组大小
+                void **new_array = realloc(allocated_pages, sizeof(void *) * max_pages * 2);
+                if (new_array == NULL) {
+                  // 内存不足，释放已分配的所有页面
+                  for (int i = 0; i < page_count; i++) {
+                    palloc_free_page(allocated_pages[i]);
+                  }
+                  free(allocated_pages);
+                  palloc_free_page(new_kpage);
+                  return -1;
+                }
+                allocated_pages = new_array;
+                max_pages *= 2;
+              }
+              allocated_pages[page_count++] = new_kpage;
+
+              // 复制内容
+              memcpy(new_kpage, kpage, PGSIZE);
+
+              // 设置子进程页表，保持相同的写入权限
+              bool writable = (*pte & PTE_W) != 0;
+              if (!pagedir_set_page(child_pd, upage, new_kpage, writable)) {
+                // 设置页表失败，释放刚分配的页面
+                palloc_free_page(new_kpage);
+                // 释放所有已分配的页面
+                for (int i = 0; i < page_count - 1; i++) {
+                  palloc_free_page(allocated_pages[i]);
+                }
+                free(allocated_pages);
+                return -1;
+              }
+            }
+          }
+        }
+      }
+    }
+  }
+
+  // 释放跟踪数组
+  free(allocated_pages);
+  return 0;  // 成功
+}
+
+
+pid_t process_fork(const char *thread_name, struct intr_frame *parent_if) {
+  struct thread *t = thread_current();
+  struct process *curr = t->pcb;
+
+  ASSERT(curr != NULL);
+  struct process *new_pcb;
+  struct child_status *cs;
+  struct fork_helper aux;
+  pid_t return_pid = -1;
+
+  // 初始化同步结构
+  sema_init(&aux.wait_sema, 0);
+  aux.load_success = false;
+  aux.child_pid = TID_ERROR;
+  aux.parent_pcb = curr;
+  aux.parent_if = parent_if; // 设置父进程中断帧
+  sema_init(&aux.child_start_sema, 0);
+
+  // 分配新的PCB
+  new_pcb = malloc(sizeof(struct process));
+  if (new_pcb == NULL) {
+    return -1;
+  }
+
+  // 分配子进程追踪结构
+  cs = malloc(sizeof(struct child_status));
+  if (cs == NULL) {
+    free(new_pcb);
+    return -1;
+  }
+
+  // 创建子进程的页目录
+  new_pcb->pagedir = pagedir_create();
+  if (new_pcb->pagedir == NULL) {
+    free(cs);
+    free(new_pcb);
+    return -1;
+  }
+
+  strlcpy(new_pcb->process_name, thread_name, strlen(thread_name) + 1);
+  
+  // 初始化子进程的数据结构
+  list_init(&new_pcb->children_list);
+  lock_init(&new_pcb->process_lock);
+  new_pcb->parent_pcb = curr;  // 设置父进程
+  new_pcb->exit_code = -1;
+
+
+  // 复制文件描述符表 - 直接共享文件描述符
+  // for (int i = 0; i < MAX_OPEN_FILES; i++) {
+  //   new_pcb->fd_table[i] = curr->fd_table[i];
+  // }
+  for (int i = 0; i < MAX_OPEN_FILES; i++) {
+    if (curr->fd_table[i] != NULL) {
+      // 注意：这个假设函数不存在，需要你实现
+      new_pcb->fd_table[i] = file_duplicate(curr->fd_table[i]);
+      if (new_pcb->fd_table[i] == NULL) {
+        // 错误处理...
+      }
+    } else {
+      new_pcb->fd_table[i] = NULL;
+    }
+  }
+
+  // 共享可执行文件引用
+  new_pcb->executable_file = curr->executable_file;
+
+  // 复制父进程的页目录
+  if (fork_copy_pd(new_pcb, curr) == -1) {
+    // 清理已分配资源
+    if (new_pcb->executable_file != NULL) {
+      file_close(new_pcb->executable_file);
+    }
+    for (int i = 0; i < MAX_OPEN_FILES; i++) {
+      if (new_pcb->fd_table[i] != NULL) {
+        file_close(new_pcb->fd_table[i]);
+      }
+    }
+    pagedir_destroy(new_pcb->pagedir);
+    free(cs);
+    free(new_pcb);
+    return -1;
+  }
+
+  // 设置子进程PCB
+  aux.child_pcb = new_pcb;
+
+  // 创建子线程
+  tid_t tid = thread_create(curr->process_name, PRI_DEFAULT, start_fork_process, &aux);
+  if (tid == TID_ERROR) {
+    // 清理已分配资源
+    if (new_pcb->executable_file != NULL) {
+      file_close(new_pcb->executable_file);
+    }
+    for (int i = 0; i < MAX_OPEN_FILES; i++) {
+      if (new_pcb->fd_table[i] != NULL) {
+        file_close(new_pcb->fd_table[i]);
+      }
+    }
+    pagedir_destroy(new_pcb->pagedir);
+    free(cs);
+    free(new_pcb);
+    return -1;
+  }
+
+  // 等待子进程完成初始化
+  sema_down(&aux.wait_sema);
+
+  if (aux.load_success) {
+    // 设置子进程追踪信息
+    cs->child_pid = aux.child_pid;
+    cs->has_exited = false;
+    cs->parent_has_waited = false;
+    cs->exit_code = -1;
+    sema_init(&cs->wait_sema, 0);
+
+    // 将子进程加入父进程的子进程列表
+    lock_acquire(&curr->process_lock);
+    list_push_back(&curr->children_list, &cs->elem);
+    lock_release(&curr->process_lock);
+
+    // 将子进程加入全局进程列表
+    lock_acquire(&all_processes_lock);
+    list_push_back(&all_processes_list, &new_pcb->global_elem);
+    lock_release(&all_processes_lock);
+
+    // 唤醒子进程继续执行
+    sema_up(&aux.child_start_sema);
+
+    return_pid = aux.child_pid;
+  } else {
+    // 子进程初始化失败
+    free(cs);
+    return_pid = -1;
+  }
+
+  return return_pid;
+}
+
+// 子进程fork启动函数
+static void start_fork_process(void *aux_) {
+  struct fork_helper *aux = (struct fork_helper *)aux_;
+  struct thread *t = thread_current();
+  struct intr_frame if_;
+
+  // 将子进程的PCB与线程关联
+  t->pcb = aux->child_pcb;
+  t->pcb->main_thread = t;
+
+  // 复制父进程的中断帧到子进程
+  memcpy(&if_, aux->parent_if, sizeof(struct intr_frame));
+
+  // 子进程的返回值应为0
+  if_.eax = 0;
+
+  // 设置子进程PID并通知父进程
+  aux->child_pid = t->tid;
+  t->pcb->pid = t->tid; // 确保PCB中的PID与线程ID一致
+  aux->load_success = true;
+
+  // 通知父进程子进程已准备好
+  sema_up(&aux->wait_sema);
+
+  // 等待父进程完成子进程记录
+  sema_down(&aux->child_start_sema);
+
+  // 运行子进程
+  asm volatile ("movl %0, %%esp; jmp intr_exit" : : "g" (&if_) : "memory");
+  NOT_REACHED();
+}
+
+
 
 /* We load ELF binaries.  The following definitions are taken
    from the ELF specification, [ELF1], more-or-less verbatim.  */

@@ -32,9 +32,18 @@ struct load_helper {
    struct process *parent_pcb;
 
    struct semaphore child_start_sema; // 新增：子进程等待父进程完成添加
-   
 };
 
+// fork辅助结构体，用于父子进程间同步
+struct fork_helper {
+   struct semaphore wait_sema;          // 父进程等待子进程初始化完成
+   struct semaphore child_start_sema;   // 子进程等待父进程完成记录
+   bool load_success;                   // 子进程初始化是否成功
+   pid_t child_pid;                     // 子进程PID
+   struct process *parent_pcb;          // 父进程PCB
+   struct process *child_pcb;           // 子进程PCB
+   struct intr_frame *parent_if;        // 父进程中断帧
+};
 
 struct child_status {
    pid_t child_pid;                // 子进程的 PID
@@ -86,6 +95,8 @@ pid_t process_execute(const char *file_name);
 int process_wait(pid_t);
 void process_exit(void);
 void process_activate(void);
+
+pid_t process_fork(const char *thread_name, struct intr_frame *parent_if);
 
 bool is_main_thread(struct thread *, struct process *);
 pid_t get_pid(struct process *);

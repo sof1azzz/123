@@ -14,12 +14,13 @@
 #include "devices/shutdown.h"
 #include "lib/string.h"
 #include "devices/input.h"
+#include "threads/palloc.h"
 
 static void syscall_handler(struct intr_frame *);
 bool is_valid_user_addr(const void *uaddr, size_t size, bool check_writeable);
 
 
-static struct lock filesys_global_lock;
+struct lock filesys_global_lock;
 
 void syscall_init(void) {
   intr_register_int(0x30, 3, INTR_ON, syscall_handler, "syscall");
@@ -79,14 +80,67 @@ static void syscall_handler(struct intr_frame *f UNUSED) {
     break;
 
   case SYS_EXEC:  // SYS_EXEC = 2
+  {
     // Validate pointer to arguments array and the first argument (char*)
     if (!is_valid_user_addr(f->esp + 4, sizeof(char *), false)) {
       terminate_process(-1, f); // Sets f->eax = -1
       break;
     }
     const char *cmd_line = (const char *)args[1];
+
+    // 验证命令行参数
+    if (cmd_line == NULL || !is_valid_user_addr(cmd_line, 1, false)) {
+      terminate_process(-1, f);
+      break;
+    }
+
+    // 安全地检查整个命令行参数 
+    int i;    
+    for (i = 0; ; i++) {
+      if (!is_valid_user_addr(cmd_line + i, 1, false)) {
+        terminate_process(-1, f);
+        break;
+      }
+      if (cmd_line[i] == '\0') {
+        break;
+      }
+      if (i >= 4096) {
+        terminate_process(-1, f);
+        break;
+      }
+    }
+
+    char *fn_copy = NULL;
+    fn_copy = palloc_get_page(0);
+    if (fn_copy == NULL) {
+      printf("SYSCALL EXEC: Failed to allocate fn_copy\n");
+      terminate_process(-1, f);
+      break;
+    }
+    strlcpy(fn_copy, cmd_line, PGSIZE);
+
+    char *delimiters = " \t\n\r\f\v";
+    char *token;
+    char *saved_ptr;
+    token = strtok_r(fn_copy, delimiters, &saved_ptr);
+    if (token == NULL) {
+      printf("SYSCALL EXEC: 你鸡巴传了个什么鬼东西?\n");
+      terminate_process(-1, f);
+      break;
+    }
+
+    struct file *file = filesys_open(token);
+    if (file == NULL) {
+      f->eax = -1;
+      palloc_free_page(fn_copy);
+      break;
+    }
+    file_close(file);
+    palloc_free_page(fn_copy);
+
     f->eax = process_execute(cmd_line);
     break;
+  }
 
   case SYS_WAIT:  // SYS_WAIT = 3
     // Validate pointer to arguments array and the first argument (pid_t)
@@ -244,9 +298,6 @@ static void syscall_handler(struct intr_frame *f UNUSED) {
       lock_release(&filesys_global_lock);
       thread_current()->pcb->next_fd = fd + 1;
     }
-
-    //lock_release(&thread_current()->pcb->process_lock);
-
   }
   break;
 

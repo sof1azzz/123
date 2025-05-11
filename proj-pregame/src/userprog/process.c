@@ -23,6 +23,9 @@
 #include "lib/string.h"
 #include "threads/pte.h"
 
+// 全局文件锁。 之后要改掉
+extern struct lock filesys_global_lock;
+
 //static struct semaphore temporary;
 static thread_func start_process NO_RETURN;
 static thread_func start_pthread NO_RETURN;
@@ -109,7 +112,7 @@ pid_t process_execute(const char *file_name_with_args) {
   char *token = NULL;      // strtok_r 返回的第一个token（可执行文件名）
   char *save_ptr = NULL;   // strtok_r 使用的上下文指针
   tid_t tid = TID_ERROR;   // 新创建线程的TID，如果成功，则为子进程的PID
-  struct load_helper aux;  // 用于父子进程间同步和传递参数的辅助结构
+  struct load_helper *aux;  // 用于父子进程间同步和传递参数的辅助结构
   pid_t result_pid = TID_ERROR;
 
   /* 1. 复制命令行参数到内核空间 (fn_copy) */
@@ -120,7 +123,7 @@ pid_t process_execute(const char *file_name_with_args) {
     return TID_ERROR; // 内存分配失败
   }
   strlcpy(fn_copy, file_name_with_args, strlen(file_name_with_args) + 1);
-  aux.file_name_with_args = fn_copy;
+  //aux.file_name_with_args = fn_copy;
 
   /* 2. 准备可执行文件名 (exe_name) 用于 thread_create */
   // exe_name 是父进程的临时缓冲区，用完后由父进程释放。
@@ -142,18 +145,26 @@ pid_t process_execute(const char *file_name_with_args) {
     return TID_ERROR;
   }
 
-  sema_init(&aux.child_start_sema, 0);  // 新增：初始化子进程启动信号量
+  aux = malloc(sizeof(struct load_helper));
+  if (aux == NULL) {
+    printf("process_execute: Failed to allocate load_helper\n");
+    palloc_free_page(fn_copy);
+    palloc_free_page(exe_name);
+    return TID_ERROR;
+  }
 
+  sema_init(&aux->child_start_sema, 0);  // 新增：初始化子进程启动信号量
+  aux->file_name_with_args = fn_copy;
   /* 3. 初始化用于同步的信号量和加载成功标志 */
-  sema_init(&aux.wait_sema, 0);
-  aux.load_success = false; // 子进程 (start_process) 会在加载成功后将其设为 true
-  aux.child_pid = TID_ERROR;  // 先设置一下
-  aux.parent_pcb = thread_current()->pcb; // <--- 新增：设置父进程的PCB
+  sema_init(&aux->wait_sema, 0);
+  aux->load_success = false; // 子进程 (start_process) 会在加载成功后将其设为 true
+  aux->child_pid = TID_ERROR;  // 先设置一下
+  aux->parent_pcb = thread_current()->pcb; // <--- 新增：设置父进程的PCB
   //aux.parent_if = &thread_current()->if_; // 设置父进程中断帧
 
   /* 4. 创建新线程以启动子进程 */
   // token (可执行文件名) 作为新线程的名称
-  tid = thread_create(token, PRI_DEFAULT, start_process, &aux);
+  tid = thread_create(token, PRI_DEFAULT, start_process, aux);
 
   if (tid == TID_ERROR) {
     // 线程创建失败，子进程未启动。父进程清理所有已分配资源。
@@ -164,10 +175,10 @@ pid_t process_execute(const char *file_name_with_args) {
   }
 
   /* 5. 等待子进程尝试加载可执行文件 */
-  sema_down(&aux.wait_sema);
+  sema_down(&aux->wait_sema);
 
   /* 6. 检查子进程是否成功加载程序 */
-  if (aux.load_success) {
+  if (aux->load_success) {
     // 子进程加载成功。
     // 此时，fn_copy (aux.file_name_with_args) 应该已由子进程 (start_process)
     // 在将其内容复制到用户栈后释放。这是父子进程间的约定。
@@ -182,7 +193,7 @@ pid_t process_execute(const char *file_name_with_args) {
     struct child_status *child_tracker = malloc(sizeof(struct child_status));
 
     if (child_tracker != NULL) {
-      child_tracker->child_pid = aux.child_pid; // 使用子进程通过aux传递回来的PID
+      child_tracker->child_pid = aux->child_pid; // 使用子进程通过aux传递回来的PID
       child_tracker->has_exited = false;
       child_tracker->parent_has_waited = false;
       child_tracker->exit_code = -1; // 初始值，表示尚未退出或未知
@@ -192,11 +203,11 @@ pid_t process_execute(const char *file_name_with_args) {
       list_push_back(&current_parent_pcb->children_list, &child_tracker->elem);
       lock_release(&current_parent_pcb->process_lock);
 
-      result_pid = aux.child_pid; // 设置函数返回值为子进程的PID
+      result_pid = aux->child_pid; // 设置函数返回值为子进程的PID
     } else {
       // 为 child_tracker 分配内存失败。这是一个严重错误。
       // 子进程已经在运行 (因为 aux.load_success == true)，但父进程无法为其建立追踪结构以供 wait() 使用。
-      printf("process_execute: Malloc failed for child_status (child PID %d). Parent cannot track for wait().\n", (int)aux.child_pid);
+      printf("process_execute: Malloc failed for child_status (child PID %d). Parent cannot track for wait().\n", (int)aux->child_pid);
       // printf 的参数用 aux.child_pid 更准确，因为这是子进程自己上报的PID。
       // 你之前的代码用了 tid，tid 是线程创建的返回值，通常它们相同，但 aux.child_pid 更直接。
 
@@ -208,14 +219,16 @@ pid_t process_execute(const char *file_name_with_args) {
       // 2. fn_copy: 因为 aux.load_success == true，根据约定，fn_copy 应该已经被子进程 (start_process) 释放了。
       // 所以在这里，父进程没有额外的内核页面需要释放。
     }
-    sema_up(&aux.child_start_sema); // 新增
+    sema_up(&aux->child_start_sema); // 新增
+    free(aux);
   } else {
     // 子进程加载失败。子线程应该已经或即将退出。
     // 根据约定，如果加载失败，start_process 不会释放 fn_copy。
     // 父进程需要清理 fn_copy 和 exe_name。
-    printf("process_execute: child process (tid %d) failed to load '%s'.\n", tid, aux.file_name_with_args);
+    //printf("process_execute: child process (tid %d) failed to load '%s'.\n", tid, aux.file_name_with_args);
     palloc_free_page(fn_copy);
     palloc_free_page(exe_name);
+    free(aux);
   }
   return result_pid;
 }
@@ -232,6 +245,13 @@ static void start_process(void *arg) {
   bool success = false; // 默认失败
   struct process *new_pcb = NULL;
 
+  /* 立即复制所需数据，避免后续依赖aux结构 */
+  //char *file_name_with_args = aux->file_name_with_args;
+  struct process *parent_pcb = aux->parent_pcb;
+  struct semaphore *wait_sema = &aux->wait_sema;
+  struct semaphore *child_start_sema = &aux->child_start_sema;
+
+
   new_pcb = malloc(sizeof(struct process));
   if (new_pcb == NULL) {
     printf("start_process: PCB malloc failed\n");
@@ -246,16 +266,26 @@ static void start_process(void *arg) {
   new_pcb->pagedir = NULL;
   t->pcb = new_pcb; // 将线程链接到PCB
 
+  // new_pcb->main_thread = t;
+  // strlcpy(new_pcb->process_name, t->name, sizeof(new_pcb->process_name));
+  // list_init(&new_pcb->children_list);
+  // lock_init(&new_pcb->process_lock); // 修正：初始化正确的锁
+  // new_pcb->pid = t->tid;
+  // new_pcb->parent_pcb = aux->parent_pcb; // 从aux获取父PCB
+  // new_pcb->executable_file = NULL; // 若使用malloc，需手动初始化
+  // new_pcb->is_exited = false;
+  // new_pcb->exit_code = -1;
+  // new_pcb->next_fd = 3; // 假设0和1将被用于stdin/stdout, assume 2 == stderr
   new_pcb->main_thread = t;
   strlcpy(new_pcb->process_name, t->name, sizeof(new_pcb->process_name));
   list_init(&new_pcb->children_list);
-  lock_init(&new_pcb->process_lock); // 修正：初始化正确的锁
+  lock_init(&new_pcb->process_lock);
   new_pcb->pid = t->tid;
-  new_pcb->parent_pcb = aux->parent_pcb; // 从aux获取父PCB
-  new_pcb->executable_file = NULL; // 若使用malloc，需手动初始化
+  new_pcb->parent_pcb = parent_pcb;
+  new_pcb->executable_file = NULL;
   new_pcb->is_exited = false;
   new_pcb->exit_code = -1;
-  new_pcb->next_fd = 3; // 假设0和1将被用于stdin/stdout, assume 2 == stderr
+  new_pcb->next_fd = 3; // 假设0和1将被用于stdin/stdout, 2用于stderr
 
   // -------- 新增：初始化文件描述符表 --------
   for (int i = 0; i < MAX_OPEN_FILES; i++) {
@@ -280,10 +310,14 @@ static void start_process(void *arg) {
 
   /* 3. 处理加载结果 */
   if (success) {
+    // aux->load_success = true;
+    // // 加载成功，子进程负责释放 fn_copy (file_name_with_args)
+    // sema_up(&aux->wait_sema);       // 通知父进程加载成功
+    // sema_down(&aux->child_start_sema); // 新增：等待父进程完成添加操作
+    // palloc_free_page(file_name_with_args);
     aux->load_success = true;
-    // 加载成功，子进程负责释放 fn_copy (file_name_with_args)
-    sema_up(&aux->wait_sema);       // 通知父进程加载成功
-    sema_down(&aux->child_start_sema); // 新增：等待父进程完成添加操作
+    sema_up(wait_sema);       // 通知父进程加载成功
+    sema_down(child_start_sema); // 等待父进程完成添加操作
     palloc_free_page(file_name_with_args);
   } else { // 加载失败
     aux->load_success = false;
@@ -449,6 +483,8 @@ void process_exit(void) {
     lock_release(process_lock);
   }
 
+
+  lock_acquire(&filesys_global_lock);
   for (int fd = 0; fd < MAX_OPEN_FILES; fd++) { // 通常FD 0, 1不是文件表中的实际文件
     if (pcb->fd_table[fd] != NULL) {
       file_close(pcb->fd_table[fd]);
@@ -462,6 +498,7 @@ void process_exit(void) {
     file_close(pcb->executable_file);
     pcb->executable_file = NULL;
   }
+  lock_release(&filesys_global_lock);
 
   // 6. 从全局进程列表中移除 (关键步骤，必须在 free(pcb) 之前)
   lock_acquire(&all_processes_lock);
@@ -666,6 +703,7 @@ pid_t process_fork(const char *thread_name, struct intr_frame *parent_if) {
   // for (int i = 0; i < MAX_OPEN_FILES; i++) {
   //   new_pcb->fd_table[i] = curr->fd_table[i];
   // }
+  lock_acquire(&filesys_global_lock);
   for (int i = 0; i < MAX_OPEN_FILES; i++) {
     if (curr->fd_table[i] != NULL) {
       // 注意：这个假设函数不存在，需要你实现
@@ -677,6 +715,7 @@ pid_t process_fork(const char *thread_name, struct intr_frame *parent_if) {
       new_pcb->fd_table[i] = NULL;
     }
   }
+  lock_release(&filesys_global_lock);
 
   // 共享可执行文件引用
   new_pcb->executable_file = curr->executable_file;
@@ -927,10 +966,16 @@ bool load(const char *file_name, void (**eip)(void), void **esp) {
     goto done;
   process_activate();
 
+  // syscall.c 的文件锁
+
+  lock_acquire(&filesys_global_lock);
+
+
   /* Open executable file. */
   file = filesys_open(ELF_name);
   if (file == NULL) {
     printf("load: %s: open failed\n", ELF_name);
+    lock_release(&filesys_global_lock);
     goto done;
   }
 
@@ -941,8 +986,10 @@ bool load(const char *file_name, void (**eip)(void), void **esp) {
     memcmp(ehdr.e_ident, "\177ELF\1\1\1", 7) || ehdr.e_type != 2 || ehdr.e_machine != 3 ||
     ehdr.e_version != 1 || ehdr.e_phentsize != sizeof(struct Elf32_Phdr) || ehdr.e_phnum > 1024) {
     printf("load: %s: error loading executable\n", ELF_name);
+    //lock_release(&filesys_global_lock);
     goto done;
   }
+  //lock_release(&filesys_global_lock);
 
   /* Read program headers. */
   file_ofs = ehdr.e_phoff;
@@ -1050,6 +1097,7 @@ bool load(const char *file_name, void (**eip)(void), void **esp) {
 
 done:
   /* We arrive here whether the load is successful or not. */
+  lock_release(&filesys_global_lock);
   palloc_free_page(fn_copy);  // free
 
   if (success) {
@@ -1061,7 +1109,7 @@ done:
     // 加载失败。
     // 如果可执行文件曾被打开并记录在PCB中，则关闭它并清除PCB中的记录。
     if (t->pcb->executable_file != NULL) {
-      file_allow_write(t->pcb->executable_file); // 在关闭前允许写入
+      //file_allow_write(t->pcb->executable_file); // 在关闭前允许写入
       file_close(t->pcb->executable_file);
       t->pcb->executable_file = NULL;
     }
@@ -1139,6 +1187,7 @@ static bool load_segment(struct file *file, off_t ofs, uint8_t *upage, uint32_t 
   ASSERT(pg_ofs(upage) == 0);
   ASSERT(ofs % PGSIZE == 0);
 
+  //lock_acquire(&filesys_global_lock);
   file_seek(file, ofs);
   while (read_bytes > 0 || zero_bytes > 0) {
     /* Calculate how to fill this page.
@@ -1149,12 +1198,17 @@ static bool load_segment(struct file *file, off_t ofs, uint8_t *upage, uint32_t 
 
     /* Get a page of memory. */
     uint8_t *kpage = palloc_get_page(PAL_USER);
-    if (kpage == NULL)
+    if (kpage == NULL) {
+      //lock_release(&filesys_global_lock);
       return false;
+    }
+      
+      
 
     /* Load this page. */
     if (file_read(file, kpage, page_read_bytes) != (int)page_read_bytes) {
       palloc_free_page(kpage);
+      //lock_release(&filesys_global_lock);
       return false;
     }
     memset(kpage + page_read_bytes, 0, page_zero_bytes);
@@ -1162,6 +1216,7 @@ static bool load_segment(struct file *file, off_t ofs, uint8_t *upage, uint32_t 
     /* Add the page to the process's address space. */
     if (!install_page(upage, kpage, writable)) {
       palloc_free_page(kpage);
+      //lock_release(&filesys_global_lock);
       return false;
     }
 
@@ -1170,6 +1225,7 @@ static bool load_segment(struct file *file, off_t ofs, uint8_t *upage, uint32_t 
     zero_bytes -= page_zero_bytes;
     upage += PGSIZE;
   }
+  //lock_release(&filesys_global_lock);
   return true;
 }
 

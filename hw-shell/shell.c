@@ -28,6 +28,9 @@ struct termios shell_tmodes;
 /* Process group id for the shell */
 pid_t shell_pgid;
 
+/* 当前前台进程组ID */
+pid_t foreground_pgid = 0;
+
 int cmd_exit(struct tokens *tokens);
 int cmd_help(struct tokens *tokens);
 int cmd_pwd(struct tokens *tokens);
@@ -38,6 +41,10 @@ char *resolve_path(const char *cmd);
 void handle_redirection(struct tokens *tokens, int *input_fd, int *output_fd, char ***cmd_args, int *arg_count);
 void execute_command(char **args, int input_fd, int output_fd);
 void run_command_pipeline(struct tokens *tokens);
+void setup_signal_handlers(void);
+void sigint_handler(int sig);
+void sigtstp_handler(int sig);
+void wait_for_foreground_job(pid_t pgid);
 
 /* Built-in command functions take token array (see parse.h) and return int */
 typedef int cmd_fun_t(struct tokens *tokens);
@@ -115,6 +122,66 @@ int lookup(char cmd[]) {
   return -1;
 }
 
+/* 信号处理器：处理SIGINT（Ctrl+C）*/
+void sigint_handler(int sig) {
+  if (foreground_pgid > 0) {
+    // 如果有前台进程组，向其发送SIGINT信号
+    kill(-foreground_pgid, SIGINT);
+  } else {
+    // 如果没有前台作业，则重新显示提示符
+    printf("\n");
+    fflush(stdout);
+  }
+}
+
+/* 信号处理器：处理SIGTSTP（Ctrl+Z）*/
+void sigtstp_handler(int sig) {
+  if (foreground_pgid > 0) {
+    // 如果有前台进程组，向其发送SIGTSTP信号
+    kill(-foreground_pgid, SIGTSTP);
+  } else {
+    // 如果没有前台作业，则重新显示提示符
+    printf("\n");
+    fflush(stdout);
+  }
+}
+
+/* 设置信号处理器 */
+void setup_signal_handlers(void) {
+  // 忽略交互式停止信号
+  signal(SIGTTOU, SIG_IGN);
+  signal(SIGTTIN, SIG_IGN);
+  signal(SIGTSTP, sigtstp_handler);
+  signal(SIGINT, sigint_handler);
+}
+
+/* 等待前台作业完成 */
+void wait_for_foreground_job(pid_t pgid) {
+  int status;
+  pid_t pid;
+
+  // 保存当前前台进程组ID
+  foreground_pgid = pgid;
+  
+  // 将进程组置于前台
+  if (shell_is_interactive) {
+    tcsetpgrp(shell_terminal, pgid);
+  }
+  
+  // 等待所有进程结束
+  while ((pid = waitpid(-pgid, &status, WUNTRACED)) > 0) {
+    // 进程结束或被暂停
+  }
+  
+  // 将shell重新置于前台
+  if (shell_is_interactive) {
+    tcsetpgrp(shell_terminal, shell_pgid);
+  }
+  
+  // 清除前台进程组ID
+  foreground_pgid = 0;
+}
+
 /* Intialization procedures for this shell */
 void init_shell() {
   /* Our shell is connected to standard input. */
@@ -138,6 +205,15 @@ void init_shell() {
 
     /* Save the current termios to a variable, so it can be restored later. */
     tcgetattr(shell_terminal, &shell_tmodes);
+    
+    /* 设置信号处理器 */
+    setup_signal_handlers();
+    
+    /* 确保shell在自己的进程组中 */
+    if (setpgid(shell_pgid, shell_pgid) < 0) {
+      perror("setpgid");
+      exit(1);
+    }
   }
 }
 
@@ -225,11 +301,11 @@ void execute_command(char **args, int input_fd, int output_fd) {
     for (int i = 0; args[i] != NULL; i++) {
       tokens_add(temp_tokens, args[i]);
     }
-
+    
     // 保存原始的标准输入输出
     int saved_stdin = dup(STDIN_FILENO);
     int saved_stdout = dup(STDOUT_FILENO);
-
+    
     // 设置重定向
     if (input_fd != STDIN_FILENO) {
       dup2(input_fd, STDIN_FILENO);
@@ -239,16 +315,16 @@ void execute_command(char **args, int input_fd, int output_fd) {
       dup2(output_fd, STDOUT_FILENO);
       close(output_fd);
     }
-
+    
     // 执行内置命令
     cmd_table[fundex].fun(temp_tokens);
-
+    
     // 恢复标准输入输出
     dup2(saved_stdin, STDIN_FILENO);
     dup2(saved_stdout, STDOUT_FILENO);
     close(saved_stdin);
     close(saved_stdout);
-
+    
     // 清理
     tokens_destroy(temp_tokens);
     return;
@@ -256,39 +332,45 @@ void execute_command(char **args, int input_fd, int output_fd) {
 
   // 外部命令，创建子进程执行
   pid_t pid = fork();
-
+  
   if (pid == -1) {
     perror("fork");
     return;
   } else if (pid == 0) {  // 子进程
+    // 创建新的进程组
+    if (shell_is_interactive) {
+      pid_t child_pid = getpid();
+      setpgid(child_pid, child_pid);
+    }
+    
     // 设置输入重定向
     if (input_fd != STDIN_FILENO) {
       dup2(input_fd, STDIN_FILENO);
       close(input_fd);
     }
-
+    
     // 设置输出重定向
     if (output_fd != STDOUT_FILENO) {
       dup2(output_fd, STDOUT_FILENO);
       close(output_fd);
     }
-
+    
     // 解析程序完整路径
     char *program_path = resolve_path(args[0]);
     if (program_path == NULL) {
       fprintf(stderr, "%s: 命令未找到\n", args[0]);
       exit(1);
     }
-
+    
     // 执行程序
     execv(program_path, args);
-
+    
     // 如果execv返回，则出错
     perror("execv");
     free(program_path);
     exit(1);
   }
-
+  
   // 父进程不需要这些文件描述符
   if (input_fd != STDIN_FILENO) {
     close(input_fd);
@@ -296,6 +378,14 @@ void execute_command(char **args, int input_fd, int output_fd) {
   if (output_fd != STDOUT_FILENO) {
     close(output_fd);
   }
+  
+  // 确保子进程在同一个进程组
+  if (shell_is_interactive) {
+    setpgid(pid, pid);
+  }
+  
+  // 等待前台命令完成
+  wait_for_foreground_job(pid);
 }
 
 // 处理包含管道的命令
@@ -304,15 +394,18 @@ void run_command_pipeline(struct tokens *tokens) {
   if (token_count == 0) {
     return;  // 空命令
   }
-
-  // 计算管道数量
+  
+  // 计算管道数量和分割命令
   int pipe_count = 0;
+  int pipe_positions[token_count]; // 存储管道符号的位置
+  
   for (size_t i = 0; i < token_count; i++) {
     if (strcmp(tokens_get_token(tokens, i), "|") == 0) {
+      pipe_positions[pipe_count] = i;
       pipe_count++;
     }
   }
-
+  
   if (pipe_count == 0) {
     // 没有管道，直接执行单个命令
     int input_fd, output_fd;
@@ -320,11 +413,7 @@ void run_command_pipeline(struct tokens *tokens) {
     int arg_count;
     handle_redirection(tokens, &input_fd, &output_fd, &args, &arg_count);
     execute_command(args, input_fd, output_fd);
-
-    // 等待子进程结束
-    int status;
-    wait(&status);
-
+    
     // 清理
     for (int i = 0; i < arg_count; i++) {
       free(args[i]);
@@ -332,17 +421,10 @@ void run_command_pipeline(struct tokens *tokens) {
     free(args);
     return;
   }
-
+  
   // 有管道，需要分段处理
   int pipes[pipe_count][2];
-  char ***commands = malloc((pipe_count + 1) * sizeof(char **));
-  int *command_lengths = malloc((pipe_count + 1) * sizeof(int));
-
-  if (!commands || !command_lengths) {
-    perror("malloc");
-    exit(1);
-  }
-
+  
   // 初始化所有管道
   for (int i = 0; i < pipe_count; i++) {
     if (pipe(pipes[i]) == -1) {
@@ -350,111 +432,268 @@ void run_command_pipeline(struct tokens *tokens) {
       exit(1);
     }
   }
-
-  // 解析命令和参数
-  int cmd_idx = 0;
-  int start_idx = 0;
-
-  for (size_t i = 0; i <= token_count; i++) {
-    if (i == token_count || strcmp(tokens_get_token(tokens, i), "|") == 0) {
-      // 提取一个命令段
-      int cmd_len = i - start_idx;
-      if (cmd_len <= 0) {
-        fprintf(stderr, "语法错误：管道符号周围缺少命令\n");
-        exit(1);
+  
+  // 创建子进程数组
+  pid_t pids[pipe_count + 1];
+  pid_t pgid = 0;  // 进程组ID
+  
+  // 创建第一段命令的子进程
+  pids[0] = fork();
+  if (pids[0] == -1) {
+    perror("fork");
+    exit(1);
+  } else if (pids[0] == 0) {  // 子进程
+    // 获取进程ID并设置进程组
+    pid_t pid = getpid();
+    if (shell_is_interactive) {
+      if (pgid == 0) pgid = pid;
+      setpgid(pid, pgid);
+    }
+    
+    // 创建第一段命令的tokens子集
+    struct tokens *cmd_tokens = tokens_create();
+    for (int j = 0; j < pipe_positions[0]; j++) {
+      tokens_add(cmd_tokens, tokens_get_token(tokens, j));
+    }
+    
+    // 处理第一段命令的重定向
+    int input_fd, output_fd;
+    char **args;
+    int arg_count;
+    
+    // 默认输出设置为第一个管道的写端
+    handle_redirection(cmd_tokens, &input_fd, &output_fd, &args, &arg_count);
+    
+    // 关闭所有不需要的管道端
+    for (int j = 0; j < pipe_count; j++) {
+      if (j == 0) {
+        // 第一个命令，输出到第一个管道
+        if (output_fd == STDOUT_FILENO) { // 如果没有重定向输出
+          dup2(pipes[0][1], STDOUT_FILENO);
+        }
+        close(pipes[j][0]); // 关闭读端
+      } else {
+        close(pipes[j][0]);
+        close(pipes[j][1]);
       }
-
-      // 为这个命令分配参数数组
-      commands[cmd_idx] = malloc((cmd_len + 1) * sizeof(char *));
-      if (!commands[cmd_idx]) {
-        perror("malloc");
-        exit(1);
-      }
-
-      // 复制参数
-      for (int j = 0; j < cmd_len; j++) {
-        commands[cmd_idx][j] = strdup(tokens_get_token(tokens, start_idx + j));
-      }
-      commands[cmd_idx][cmd_len] = NULL;
-      command_lengths[cmd_idx] = cmd_len;
-
-      cmd_idx++;
-      start_idx = i + 1;  // 跳过管道符号
+    }
+    
+    tokens_destroy(cmd_tokens);
+    
+    // 执行命令
+    if (args[0] == NULL) {
+      fprintf(stderr, "语法错误：管道符号前缺少命令\n");
+      exit(1);
+    }
+    
+    char *program_path = resolve_path(args[0]);
+    if (program_path == NULL) {
+      fprintf(stderr, "%s: 命令未找到\n", args[0]);
+      exit(1);
+    }
+    
+    // 设置输入重定向
+    if (input_fd != STDIN_FILENO) {
+      dup2(input_fd, STDIN_FILENO);
+      close(input_fd);
+    }
+    
+    // 如果有输出重定向，它已经由handle_redirection处理
+    if (output_fd != STDOUT_FILENO && output_fd != pipes[0][1]) {
+      dup2(output_fd, STDOUT_FILENO);
+      close(output_fd);
+      close(pipes[0][1]); // 关闭管道写端，因为我们使用了重定向
+    }
+    
+    execv(program_path, args);
+    perror("execv");
+    
+    // 清理
+    for (int j = 0; j < arg_count; j++) {
+      free(args[j]);
+    }
+    free(args);
+    free(program_path);
+    exit(1);
+  } else {
+    // 父进程保存第一个子进程的PID作为进程组ID
+    pgid = pids[0];
+    if (shell_is_interactive) {
+      setpgid(pids[0], pgid);
     }
   }
-
-  // 执行管道命令链
-  pid_t *pids = malloc((pipe_count + 1) * sizeof(pid_t));
-  if (!pids) {
-    perror("malloc");
-    exit(1);
-  }
-
-  for (int i = 0; i <= pipe_count; i++) {
+  
+  // 创建中间段命令的子进程
+  for (int i = 1; i < pipe_count; i++) {
     pids[i] = fork();
-
     if (pids[i] == -1) {
       perror("fork");
       exit(1);
     } else if (pids[i] == 0) {  // 子进程
-      // 设置管道连接
-      if (i > 0) {  // 不是第一个命令，从前一个管道读取输入
-        dup2(pipes[i - 1][0], STDIN_FILENO);
+      // 设置进程组
+      if (shell_is_interactive) {
+        setpgid(getpid(), pgid);
       }
-
-      if (i < pipe_count) {  // 不是最后一个命令，输出到下一个管道
-        dup2(pipes[i][1], STDOUT_FILENO);
+      
+      // 创建此段命令的tokens子集
+      struct tokens *cmd_tokens = tokens_create();
+      for (int j = pipe_positions[i-1] + 1; j < pipe_positions[i]; j++) {
+        tokens_add(cmd_tokens, tokens_get_token(tokens, j));
       }
-
-      // 关闭所有管道描述符
+      
+      // 处理此段命令的重定向
+      int input_fd, output_fd;
+      char **args;
+      int arg_count;
+      
+      handle_redirection(cmd_tokens, &input_fd, &output_fd, &args, &arg_count);
+      
+      // 关闭所有不需要的管道端
       for (int j = 0; j < pipe_count; j++) {
+        if (j == i - 1) {
+          // 从上一个管道读取
+          if (input_fd == STDIN_FILENO) { // 如果没有重定向输入
+            dup2(pipes[j][0], STDIN_FILENO);
+          }
+        } else if (j == i) {
+          // 输出到下一个管道
+          if (output_fd == STDOUT_FILENO) { // 如果没有重定向输出
+            dup2(pipes[j][1], STDOUT_FILENO);
+          }
+        }
         close(pipes[j][0]);
         close(pipes[j][1]);
       }
-
-      // 检查重定向
-      int input_fd = STDIN_FILENO;
-      int output_fd = STDOUT_FILENO;
-
-      // 解析程序完整路径
-      char *program_path = resolve_path(commands[i][0]);
-      if (program_path == NULL) {
-        fprintf(stderr, "%s: 命令未找到\n", commands[i][0]);
+      
+      tokens_destroy(cmd_tokens);
+      
+      // 执行命令
+      if (args[0] == NULL) {
+        fprintf(stderr, "语法错误：管道符号之间缺少命令\n");
         exit(1);
       }
-
-      // 执行程序
-      execv(program_path, commands[i]);
-
-      // 如果execv返回，则出错
+      
+      char *program_path = resolve_path(args[0]);
+      if (program_path == NULL) {
+        fprintf(stderr, "%s: 命令未找到\n", args[0]);
+        exit(1);
+      }
+      
+      // 设置输入重定向
+      if (input_fd != STDIN_FILENO && input_fd != pipes[i-1][0]) {
+        dup2(input_fd, STDIN_FILENO);
+        close(input_fd);
+      }
+      
+      // 设置输出重定向
+      if (output_fd != STDOUT_FILENO && output_fd != pipes[i][1]) {
+        dup2(output_fd, STDOUT_FILENO);
+        close(output_fd);
+      }
+      
+      execv(program_path, args);
       perror("execv");
+      
+      // 清理
+      for (int j = 0; j < arg_count; j++) {
+        free(args[j]);
+      }
+      free(args);
       free(program_path);
       exit(1);
+    } else {
+      // 父进程设置子进程的进程组
+      if (shell_is_interactive) {
+        setpgid(pids[i], pgid);
+      }
     }
   }
-
+  
+  // 创建最后一段命令的子进程
+  pids[pipe_count] = fork();
+  if (pids[pipe_count] == -1) {
+    perror("fork");
+    exit(1);
+  } else if (pids[pipe_count] == 0) {  // 子进程
+    // 设置进程组
+    if (shell_is_interactive) {
+      setpgid(getpid(), pgid);
+    }
+    
+    // 创建最后一段命令的tokens子集
+    struct tokens *cmd_tokens = tokens_create();
+    for (int j = pipe_positions[pipe_count-1] + 1; j < token_count; j++) {
+      tokens_add(cmd_tokens, tokens_get_token(tokens, j));
+    }
+    
+    // 处理最后一段命令的重定向
+    int input_fd, output_fd;
+    char **args;
+    int arg_count;
+    
+    handle_redirection(cmd_tokens, &input_fd, &output_fd, &args, &arg_count);
+    
+    // 关闭所有不需要的管道端
+    for (int j = 0; j < pipe_count; j++) {
+      if (j == pipe_count - 1) {
+        // 最后一个命令，从最后一个管道读取
+        if (input_fd == STDIN_FILENO) { // 如果没有重定向输入
+          dup2(pipes[j][0], STDIN_FILENO);
+        }
+        close(pipes[j][1]); // 关闭写端
+      } else {
+        close(pipes[j][0]);
+        close(pipes[j][1]);
+      }
+    }
+    
+    tokens_destroy(cmd_tokens);
+    
+    // 执行命令
+    if (args[0] == NULL) {
+      fprintf(stderr, "语法错误：管道符号后缺少命令\n");
+      exit(1);
+    }
+    
+    char *program_path = resolve_path(args[0]);
+    if (program_path == NULL) {
+      fprintf(stderr, "%s: 命令未找到\n", args[0]);
+      exit(1);
+    }
+    
+    // 设置输入重定向
+    if (input_fd != STDIN_FILENO && input_fd != pipes[pipe_count-1][0]) {
+      dup2(input_fd, STDIN_FILENO);
+      close(input_fd);
+    }
+    
+    // 输出重定向已经由handle_redirection处理
+    
+    execv(program_path, args);
+    perror("execv");
+    
+    // 清理
+    for (int j = 0; j < arg_count; j++) {
+      free(args[j]);
+    }
+    free(args);
+    free(program_path);
+    exit(1);
+  } else {
+    // 父进程设置子进程的进程组
+    if (shell_is_interactive) {
+      setpgid(pids[pipe_count], pgid);
+    }
+  }
+  
   // 父进程关闭所有管道描述符
   for (int i = 0; i < pipe_count; i++) {
     close(pipes[i][0]);
     close(pipes[i][1]);
   }
-
+  
   // 等待所有子进程结束
-  for (int i = 0; i <= pipe_count; i++) {
-    int status;
-    waitpid(pids[i], &status, 0);
-  }
-
-  // 清理资源
-  for (int i = 0; i <= pipe_count; i++) {
-    for (int j = 0; j < command_lengths[i]; j++) {
-      free(commands[i][j]);
-    }
-    free(commands[i]);
-  }
-  free(commands);
-  free(command_lengths);
-  free(pids);
+  wait_for_foreground_job(pgid);
 }
 
 int main(unused int argc, unused char *argv[]) {
@@ -556,4 +795,4 @@ char *resolve_path(const char *cmd) {
   free(path_copy);
 
   return resolved_path;
-}
+} 
